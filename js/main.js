@@ -1,5 +1,5 @@
 /*
- * main.js — Penalty Cup 26 application orchestrator.
+ * main.js — Penalty Nations 2026 application orchestrator.
  *
  * Owns the screen state machine and the tournament progression that wraps the
  * pure engine (tournament.js): menu -> draw -> group stage -> knockout, with the
@@ -51,7 +51,7 @@
     setScreen(
       '<div class="menu">' +
       '<div class="menu-badge">2026 · 48 TEAMS</div>' +
-      '<h1 class="title">Penalty<span>Cup</span>26</h1>' +
+      '<h1 class="title">Penalty<span>Nations</span>2026</h1>' +
       '<p class="subtitle">Every match decided from the spot.</p>' +
       '<div class="panel">' +
         '<label class="field-label">Your team</label>' +
@@ -115,12 +115,6 @@
     App.showHub();
   };
 
-  // matchdays for a group: [[f0,f1],[f2,f3],[f4,f5]]
-  function matchdays(group) {
-    var f = T.groupFixtures(group);
-    return [[f[0], f[1]], [f[2], f[3]], [f[4], f[5]]];
-  }
-
   // ==========================================================================
   // HUB
   // ==========================================================================
@@ -182,7 +176,7 @@
   };
 
   function hubStatusLine() {
-    if (S.playerStatus === 'champion') return '<div class="hub-status win">You won Penalty Cup 26! 🏆</div>';
+    if (S.playerStatus === 'champion') return '<div class="hub-status win">You won Penalty Nations 2026! 🏆</div>';
     if (S.playerStatus === 'runnerup') return '<div class="hub-status">Runner-up. So close.</div>';
     if (S.playerStatus === 'eliminated') {
       return '<div class="hub-status out">Eliminated · ' + (S.eliminationRound || 'group stage') + '</div>';
@@ -223,10 +217,9 @@
   // ----- GROUP STAGE --------------------------------------------------------
   App.playGroupMatchday = function () {
     var gi = S.playerGroupIndex;
-    var mds = matchdays(S.groups[gi]);
-    var md = mds[S.matchday];
     var pid = S.playerTeam.id;
-    var playerFix = md[0].home === pid || md[0].away === pid ? md[0] : md[1];
+    var split = T.playerMatchday(S.groups[gi], pid, S.matchday);
+    var playerFix = split.playerFixture;
 
     var oppId = playerFix.home === pid ? playerFix.away : playerFix.home;
     var opponent = lookup(oppId);
@@ -237,16 +230,15 @@
       mode: 'group',
       onResolve: function (state) {
         // record player's result (player is whichever side they actually were)
-        var playerScored, oppScored;
         // engine: A = player (always kicks first in our match setup)
-        playerScored = state.a; oppScored = state.b;
+        var playerScored = state.a, oppScored = state.b;
         var res = playerFix.home === pid
           ? { home: pid, away: oppId, hg: playerScored, ag: oppScored }
           : { home: oppId, away: pid, hg: oppScored, ag: playerScored };
         S.groupResults[gi].push(res);
 
-        // simulate the rest of this matchday across all groups
-        simulateMatchday(S.matchday, gi, playerFix);
+        // simulate the rest of this matchday — never the player's own fixture
+        simulateMatchday(S.matchday);
 
         S.matchday++;
         if (S.matchday >= 3) finalizeGroupStage();
@@ -255,11 +247,14 @@
     });
   };
 
-  function simulateMatchday(mdIndex, playerGroupIndex, playerFix) {
+  // Simulate this matchday's fixtures everywhere EXCEPT the one the player just
+  // played. The player's fixture is excluded by team id, so it is never both
+  // recorded and simulated (fixes the double-count bug).
+  function simulateMatchday(mdIndex) {
+    var pid = S.playerTeam.id;
     S.groups.forEach(function (g, gi) {
-      var md = matchdays(g)[mdIndex];
-      md.forEach(function (fix) {
-        if (gi === playerGroupIndex && fix === playerFix) return; // already played
+      T.matchdayFixtures(g)[mdIndex].forEach(function (fix) {
+        if (gi === S.playerGroupIndex && (fix.home === pid || fix.away === pid)) return;
         var home = lookup(fix.home), away = lookup(fix.away);
         var r = T.simulateGroupMatch(home, away, S.rng);
         S.groupResults[gi].push({ home: fix.home, away: fix.away, hg: r.a, ag: r.b });
@@ -401,6 +396,7 @@
       App.startShootout({
         opponent: cfg.opponent,
         mode: cfg.mode,
+        roundIndex: cfg.roundIndex,
         keeperP: keeperP,
         keeperO: keeperO,
         roundLabel: cfg.roundLabel,
@@ -425,19 +421,18 @@
         '</div>' +
         '<div class="kick-dots" id="kickDots"></div>' +
         '<canvas id="pitch" class="pitch"></canvas>' +
-        '<div class="match-msg" id="matchMsg"></div>' +
       '</div>', 'screen-match');
 
     Ads.gameplayStart();
     var canvas = $('#pitch');
     var allowRetake = Config.ADS_ENABLED; // rewarded retake available
-    var msgEl = $('#matchMsg');
 
     var m = new root.ShootoutMatch({
       canvas: canvas,
       teamA: S.playerTeam,
       teamB: cfg.opponent,
       mode: cfg.mode,
+      roundIndex: cfg.roundIndex || 0,
       keeperA: cfg.keeperP,
       keeperB: cfg.keeperO,
       allowRetake: allowRetake,
@@ -446,19 +441,15 @@
       onUpdate: function (state) {
         $('#scoreA').textContent = state.a;
         $('#scoreB').textContent = state.b;
-        renderDots(state, cfg.mode);
+        renderDots(state);
       },
       onKickResult: function (info) {
-        // track player keeper form (opponent kicking at us)
+        // track player keeper form (opponent kicking at us); the outcome label
+        // is drawn on the canvas by the match itself.
         if (info.side === 'B') {
           S.form.kicksFaced++;
           if (info.result === 'save') S.form.savesMade++;
         }
-        msgEl.textContent = resultText(info);
-        // colour from the player's perspective: our goal or our keeper's save = good
-        var goodForPlayer = info.side === 'A' ? info.scored : !info.scored;
-        msgEl.className = 'match-msg show ' + (goodForPlayer ? 'good' : 'bad');
-        setTimeout(function () { msgEl.className = 'match-msg'; }, 900);
       },
       onRetakeOffer: function (retakeCb) {
         showRetakeOffer(retakeCb);
@@ -478,8 +469,7 @@
     m.start();
   };
 
-  function renderDots(state, mode) {
-    var max = mode === 'group' ? 5 : 5;
+  function renderDots(state) {
     var a = [], b = [];
     state.history.forEach(function (h) {
       var d = '<span class="dot ' + (h.scored ? 'sc' : 'ms') + '"></span>';
@@ -487,15 +477,6 @@
     });
     var el = $('#kickDots');
     if (el) el.innerHTML = '<div class="dot-row">' + a.join('') + '</div><div class="dot-row b">' + b.join('') + '</div>';
-  }
-
-  function resultText(info) {
-    if (info.result === 'goal') return info.side === 'A' ? 'GOAL!' : 'CONCEDED!';
-    if (info.result === 'save') return 'SAVED!';
-    if (info.result === 'post') return 'OFF THE POST!';
-    if (info.result === 'wide') return 'WIDE!';
-    if (info.result === 'over') return 'OVER THE BAR!';
-    return '';
   }
 
   function showRetakeOffer(retakeCb) {
@@ -555,7 +536,7 @@
         '<div class="end-emoji">🥲</div>' +
         '<div class="end-head">Eliminated</div>' +
         '<div class="end-sub">' + S.playerTeam.name + ' are out · ' + (S.eliminationRound || 'group stage') + '</div>' +
-        '<div class="end-note">We\'ll play out the rest of Penalty Cup 26 for you.</div>' +
+        '<div class="end-note">We\'ll play out the rest of Penalty Nations 2026 for you.</div>' +
         '<button id="toHub" class="btn btn-gold btn-lg">See how it ends</button>' +
       '</div>', 'screen-end');
     on('#toHub', returnToHub);
@@ -569,7 +550,7 @@
         '<div class="trophy-big">🏆</div>' +
         '<div class="end-head gold">CHAMPIONS</div>' +
         '<div class="end-sub">' + UI.flag(S.playerTeam, 'big') + ' ' + S.playerTeam.name +
-          ' win Penalty Cup 26!</div>' +
+          ' win Penalty Nations 2026!</div>' +
         '<button id="toHub" class="btn btn-gold btn-lg">Lift the trophy</button>' +
       '</div>', 'screen-end');
     on('#toHub', returnToHub);

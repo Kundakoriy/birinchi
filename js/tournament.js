@@ -1,5 +1,5 @@
 /*
- * tournament.js — Penalty Cup 26 tournament engine (PURE module, no DOM / no SDK).
+ * tournament.js — Penalty Nations 2026 tournament engine (PURE module, no DOM / no SDK).
  *
  * Contains every rule that decides a result:
  *   - Penalty shootout engine (group rules + IFAB knockout rules with early
@@ -198,6 +198,32 @@
     ];
   }
 
+  /**
+   * The 6 fixtures grouped into 3 matchdays of 2 fixtures each. Within a group
+   * of 4, every team plays exactly once per matchday (3 matches total).
+   */
+  function matchdayFixtures(group) {
+    var f = groupFixtures(group);
+    return [[f[0], f[1]], [f[2], f[3]], [f[4], f[5]]];
+  }
+
+  function fixtureHas(fix, teamId) {
+    return fix.home === teamId || fix.away === teamId;
+  }
+
+  /**
+   * For a given matchday, split that matchday's two fixtures into the one the
+   * player is in and the one to simulate. Returns { playerFixture, otherFixture }.
+   * The player fixture is identified by team id (never by object identity) so it
+   * can never be both recorded AND simulated.
+   */
+  function playerMatchday(group, playerId, mdIndex) {
+    var md = matchdayFixtures(group)[mdIndex];
+    var playerFixture = fixtureHas(md[0], playerId) ? md[0] : md[1];
+    var otherFixture = playerFixture === md[0] ? md[1] : md[0];
+    return { playerFixture: playerFixture, otherFixture: otherFixture };
+  }
+
   function blankRow(team) {
     return {
       id: team.id,
@@ -370,6 +396,8 @@
     simulateShootout: simulateShootout,
     simulateGroupMatch: simulateGroupMatch,
     groupFixtures: groupFixtures,
+    matchdayFixtures: matchdayFixtures,
+    playerMatchday: playerMatchday,
     computeStandings: computeStandings,
     compareRows: compareRows,
     determineQualifiers: determineQualifiers,

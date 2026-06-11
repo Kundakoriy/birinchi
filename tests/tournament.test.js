@@ -1,5 +1,5 @@
 /*
- * Headless unit tests for the Penalty Cup 26 tournament engine.
+ * Headless unit tests for the Penalty Nations 2026 tournament engine.
  * Run with:  node tests/tournament.test.js   (or: npm test)
  *
  * No test framework dependency — a tiny assert harness keeps it zero-install.
@@ -252,6 +252,63 @@ group('Determinism: same seed -> same simulated result');
   var r2 = T.simulateShootout(a, b, 'knockout', T.makeRng(7));
   eq(r1.a + '-' + r1.b, r2.a + '-' + r2.b, 'identical seed gives identical score');
   eq(r1.winner, r2.winner, 'identical seed gives identical winner');
+}
+
+// ---------------------------------------------------------------------------
+group('Group stage: every team plays exactly 3 (no double-counting player)');
+{
+  var g = {
+    name: 'Group A', letter: 'A',
+    teams: [
+      { id: 'P', name: 'Player', rating: 80 },
+      { id: 'Q', name: 'Q', rating: 75 },
+      { id: 'R', name: 'R', rating: 70 },
+      { id: 'S', name: 'S', rating: 65 }
+    ]
+  };
+  var pid = 'P';
+  var rng = T.makeRng(42);
+  var lookup = {}; g.teams.forEach(function (t) { lookup[t.id] = t; });
+
+  // Reproduce the real orchestration: each matchday the player records their
+  // own fixture, and ONLY the other fixture is simulated.
+  var results = [];
+  var playerFixtures = [];
+  for (var md = 0; md < 3; md++) {
+    var split = T.playerMatchday(g, pid, md);
+    // sanity: the player's fixture must contain the player; the other must not.
+    ok(split.playerFixture.home === pid || split.playerFixture.away === pid,
+      'matchday ' + md + ': player fixture contains the player');
+    ok(split.otherFixture.home !== pid && split.otherFixture.away !== pid,
+      'matchday ' + md + ': other fixture does NOT contain the player');
+    playerFixtures.push(split.playerFixture);
+    // record player's result (stand-in for an interactive shootout)
+    results.push({ home: split.playerFixture.home, away: split.playerFixture.away, hg: 3, ag: 2 });
+    // simulate the other fixture only
+    var o = split.otherFixture;
+    var sim = T.simulateGroupMatch(lookup[o.home], lookup[o.away], rng);
+    results.push({ home: o.home, away: o.away, hg: sim.a, ag: sim.b });
+  }
+
+  eq(results.length, 6, 'exactly 6 fixtures recorded for the group');
+
+  // No fixture (unordered pair) appears twice -> nothing double-counted.
+  var seenPairs = {};
+  var dup = false;
+  results.forEach(function (r) {
+    var key = [r.home, r.away].sort().join('-');
+    if (seenPairs[key]) dup = true;
+    seenPairs[key] = true;
+  });
+  ok(!dup, 'no fixture is recorded twice (player match not duplicated by sim)');
+
+  var st = T.computeStandings(g, results);
+  st.forEach(function (row) {
+    eq(row.P, 3, row.name + ' played exactly 3');
+  });
+  // the player specifically must have played 3, not 6
+  var pr = st.filter(function (r) { return r.id === 'P'; })[0];
+  eq(pr.P, 3, 'PLAYER played exactly 3 (regression: not 6)');
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 /*
- * draw.js — tournament draw for Penalty Cup 26.
+ * draw.js — tournament draw for Penalty Nations 2026.
  *
  *  - officialDraw(): the verified real FIFA World Cup 2026 final draw
  *    (Washington D.C., 5 December 2025). Group position order follows the pots

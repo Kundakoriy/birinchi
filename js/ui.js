@@ -1,5 +1,5 @@
 /*
- * ui.js — pure DOM/render helpers for Penalty Cup 26 screens.
+ * ui.js — pure DOM/render helpers for Penalty Nations 2026 screens.
  * No game logic here; main.js calls these to build markup.
  */
 (function (root) {

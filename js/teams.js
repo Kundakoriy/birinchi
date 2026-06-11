@@ -1,5 +1,5 @@
 /*
- * teams.js — the 48 qualified national teams for Penalty Cup 26.
+ * teams.js — the 48 qualified national teams for Penalty Nations 2026.
  *
  * Each team: { id, name, code (ISO 3166-1 alpha-2 for flag-icons), rating, pot }.
  * Ratings are a 0-100 strength estimate used by the AI / keeper / shootout model.

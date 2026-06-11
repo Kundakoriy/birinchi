@@ -1,14 +1,17 @@
 /*
- * keeper.js — goalkeeper rating & dive AI.
+ * keeper.js — goalkeeper rating, dive AI, and save-probability model.
  *
  * Keeper rating = f(team strength, current round index, team's results so far).
- * A keeper sharpens as the team goes deeper and as it banks good results.
- * The rating drives the dive decision and reach in the interactive shootout.
+ * The save model is "third-based": the goal mouth is split into Left / Centre /
+ * Right thirds. A save needs the keeper to commit to the SAME third as the shot;
+ * corner placement and a wrong guess both make scoring far more likely. All
+ * magnitudes come from Config.TUNING so difficulty is tunable in one place.
  */
 (function (root) {
   'use strict';
 
   var T = root.Tournament;
+  var Config = root.Config;
 
   // Badge bands shown on the match preview.
   var BANDS = [
@@ -17,6 +20,9 @@
     { min: 78, label: 'Elite',       stars: 3 },
     { min: 88, label: 'World-class', stars: 4 }
   ];
+
+  function tuning() { return Config.TUNING; }
+  function skillOf(rating) { return T.clamp((rating - 40) / 59, 0, 1); }
 
   /**
    * @param team       team object {rating}
@@ -44,30 +50,61 @@
     return band;
   }
 
+  // Which third of the goal a normalized x (-1..1) falls in.
+  function thirdOf(x) {
+    if (x < -0.22) return 'L';
+    if (x > 0.22) return 'R';
+    return 'C';
+  }
+
+  // How "cornery" a shot is (0 = central/low, 1 = tucked into a top corner).
+  function cornerness(shot) {
+    var horiz = T.clamp((Math.abs(shot.x) - 0.2) / 0.7, 0, 1);
+    var vert = T.clamp(shot.y / 1.0, 0, 1);
+    return T.clamp(horiz * 0.7 + vert * 0.5, 0, 1);
+  }
+
+  // The keeper (AI) picks a third to dive into, guessing the true third with a
+  // skill/round-dependent probability.
+  function aiPickThird(rating, roundIndex, shotThird, rng) {
+    var t = tuning();
+    var p = T.clamp(t.KEEPER_GUESS_BASE + t.KEEPER_GUESS_SKILL * skillOf(rating) +
+                    t.KEEPER_GUESS_PER_ROUND * (roundIndex || 0), 0, 0.95);
+    if (rng() < p) return shotThird; // guessed right
+    // guessed wrong: pick one of the other two thirds
+    var others = ['L', 'C', 'R'].filter(function (x) { return x !== shotThird; });
+    return others[Math.floor(rng() * others.length)];
+  }
+
   /**
-   * Decide where the keeper dives and whether it reaches a shot.
-   * Shot is {x, y} in normalized goal space: x in [-1,1] (left..right),
-   * y in [0,1] (ground..crossbar). Returns {diveX, diveY, reach, willSave?}.
-   *
-   * The keeper "reads" the shot with accuracy proportional to its rating, then
-   * commits to a dive. Reach (save radius) also scales with rating.
+   * Probability a shot is SAVED, given the defending keeper's rating, the round,
+   * whether the keeper committed to the correct third, and the shot's cornerness.
+   * Used for BOTH the AI keeper (you attacking) and your keeper (you defending),
+   * with separate tuning bands.
    */
-  function decideDive(rating, shot, rng) {
-    rng = rng || Math.random;
-    var skill = (rating - 40) / 59; // 0..1
-    // Read accuracy: better keepers guess closer to the true side.
-    var readError = (1 - skill) * 0.9;
-    var diveX = T.clamp(shot.x + (rng() * 2 - 1) * readError, -1.1, 1.1);
-    // Keepers favour mid-height; they rarely read top-corner intent perfectly.
-    var diveY = T.clamp(shot.y * skill + (rng() * 0.4), 0, 1);
-    var reach = 0.28 + skill * 0.30; // save radius in goal-width units
-    return { diveX: diveX, diveY: diveY, reach: reach };
+  function saveProbability(rating, roundIndex, correctThird, corner, mode) {
+    var t = tuning();
+    if (mode === 'defense') {
+      if (!correctThird) return t.DEF_WRONG_SAVE;
+      var d = t.DEF_SAVE_BASE + t.DEF_SAVE_SKILL * skillOf(rating) +
+              t.DEF_SAVE_PER_ROUND * (roundIndex || 0);
+      return T.clamp(d * (1 - corner * t.CORNER_SAVE_REDUCTION), 0, 0.95);
+    }
+    // attack: AI keeper saving your shot
+    if (!correctThird) return t.WRONG_GUESS_SAVE;
+    var s = t.KEEPER_SAVE_BASE + t.KEEPER_SAVE_SKILL * skillOf(rating) +
+            t.KEEPER_SAVE_PER_ROUND * (roundIndex || 0);
+    return T.clamp(s * (1 - corner * t.CORNER_SAVE_REDUCTION), 0, 0.95);
   }
 
   root.Keeper = {
     BANDS: BANDS,
     keeperRating: keeperRating,
     badge: badge,
-    decideDive: decideDive
+    thirdOf: thirdOf,
+    cornerness: cornerness,
+    aiPickThird: aiPickThird,
+    saveProbability: saveProbability,
+    skillOf: skillOf
   };
 })(typeof self !== 'undefined' ? self : this);

@@ -1,11 +1,11 @@
 {
-  "name": "penalty-cup-26",
-  "version": "0.1.0",
-  "description": "Penalty Cup 26 — portrait-first HTML5 penalty shootout World Cup (48 teams).",
+  "name": "penalty-nations-2026",
+  "version": "0.2.0",
+  "description": "Penalty Nations 2026 — portrait-first HTML5 penalty shootout World Cup (48 teams).",
   "private": true,
   "scripts": {
     "test": "node tests/tournament.test.js",
-    "start": "python3 -m http.server 8080"
+    "start": "npx serve -l 8080"
   },
   "license": "UNLICENSED"
 }

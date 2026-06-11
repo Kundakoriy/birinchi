@@ -1,16 +1,14 @@
 /*
- * game.js — the interactive penalty shootout (swipe-to-shoot + canvas render).
+ * game.js — the interactive penalty shootout (canvas).
  *
- * Drives a full shootout using the pure Tournament engine for the rules and the
- * Keeper module for the AI. The human always controls team A and kicks first in
- * each pair; the opponent's kicks are auto-played with a compressed animation.
+ * Two-sided: on ATTACK you drag from the ball to aim (direction + power) and
+ * release to shoot at a continuous goal area; on DEFENCE you pick which third
+ * the keeper dives (tap L / C / R, or drag) against a short timer. The goal mouth
+ * is split into Left/Centre/Right thirds — a save needs the keeper committed to
+ * the same third as the shot, and corner placement beats the keeper.
  *
- * Gameplay: drag from the ball to set direction + power, release to fire. The
- * shot maps to a continuous goal area (no discrete zones). Higher / corner
- * placements carry more miss risk and are harder to save. Mouse-drag works
- * identically on desktop.
- *
- * No SDK calls live here — rewarded-ad retakes are delegated to a callback.
+ * Difficulty magnitudes all live in Config.TUNING (see config.js). No SDK calls
+ * here — rewarded-ad retakes are delegated to a callback.
  */
 (function (root) {
   'use strict';
@@ -19,20 +17,24 @@
   var Keeper = root.Keeper;
   var Sound = root.Sound;
 
+  // normalized x-centre of each third in goal space (-1..1)
+  var THIRD_X = { L: -0.6, C: 0, R: 0.6 };
+
   function ShootoutMatch(opts) {
     this.canvas = opts.canvas;
     this.ctx = this.canvas.getContext('2d');
     this.teamA = opts.teamA;       // player's team
     this.teamB = opts.teamB;       // opponent
     this.mode = opts.mode;         // 'group' | 'knockout'
+    this.roundIndex = opts.roundIndex || 0;
     this.keeperA = opts.keeperA;   // player's keeper rating (defends B's kicks)
     this.keeperB = opts.keeperB;   // opponent keeper rating (defends A's kicks)
     this.allowRetake = !!opts.allowRetake;
-    this.isFinalKickPotential = !!opts.isFinalKickPotential; // tournament-winning slow-mo
+    this.isFinalKickPotential = !!opts.isFinalKickPotential;
 
     this.onUpdate = opts.onUpdate || function () {};
     this.onKickResult = opts.onKickResult || function () {};
-    this.onRetakeOffer = opts.onRetakeOffer || null; // (retakeCb) => void
+    this.onRetakeOffer = opts.onRetakeOffer || null;
     this.onEnd = opts.onEnd || function () {};
     this.onWinningKick = opts.onWinningKick || null;
 
@@ -40,14 +42,20 @@
     this.state = T.newShootout(this.mode);
     this.retakeUsed = false;
 
-    this.phase = 'idle'; // idle|aim|flying|result|opponent|paused|done
+    this.phase = 'idle';
     this.shake = 0;
     this.timeScale = 1;
+    this.banner = null; // {text, good, until}
 
     this._raf = null;
-    this._anim = null; // current animation descriptor
-    this._drag = null; // {x,y} current pointer in canvas space
+    this._anim = null;
+    this._drag = null;
+    this._dragging = false;
     this._lastTs = 0;
+    this._trail = [];
+    this._keeper = { pose: 'ready', t: 0, kit: 'opp' }; // current keeper render state
+    this._diveDeadline = 0;
+    this._diveTimer = null;
 
     this._bindInput();
     this._resize();
@@ -61,6 +69,7 @@
 
   ShootoutMatch.prototype.destroy = function () {
     if (this._raf) cancelAnimationFrame(this._raf);
+    if (this._diveTimer) clearTimeout(this._diveTimer);
     this._unbindInput();
   };
 
@@ -75,19 +84,19 @@
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     this.goal = {
-      left: this.W * 0.13,
-      right: this.W * 0.87,
-      top: this.H * 0.13,
-      line: this.H * 0.46 // ground line of the goal mouth
+      left: this.W * 0.12,
+      right: this.W * 0.88,
+      top: this.H * 0.16,
+      line: this.H * 0.50
     };
     this.goal.width = this.goal.right - this.goal.left;
     this.goal.height = this.goal.line - this.goal.top;
-    this.ballHome = { x: this.W * 0.5, y: this.H * 0.84, r: Math.max(11, this.W * 0.035) };
-    this.ball = { x: this.ballHome.x, y: this.ballHome.y };
+    this.ballR = Math.max(11, this.W * 0.038);
+    this.ballHome = { x: this.W * 0.5, y: this.H * 0.86 };
+    this.ball = { x: this.ballHome.x, y: this.ballHome.y, rot: 0 };
     this.maxDrag = this.H * 0.30;
   };
 
-  // map normalized shot {x:-1..1, y:0..1} to canvas point
   ShootoutMatch.prototype._goalPoint = function (sx, sy) {
     var g = this.goal;
     return {
@@ -102,10 +111,11 @@
     this._onDown = function (e) { self._pointerDown(e); };
     this._onMove = function (e) { self._pointerMove(e); };
     this._onUp = function (e) { self._pointerUp(e); };
+    this._onResize = function () { self._resize(); };
     this.canvas.addEventListener('pointerdown', this._onDown);
     window.addEventListener('pointermove', this._onMove);
     window.addEventListener('pointerup', this._onUp);
-    window.addEventListener('resize', this._onResize = function () { self._resize(); });
+    window.addEventListener('resize', this._onResize);
   };
   ShootoutMatch.prototype._unbindInput = function () {
     this.canvas.removeEventListener('pointerdown', this._onDown);
@@ -113,24 +123,26 @@
     window.removeEventListener('pointerup', this._onUp);
     window.removeEventListener('resize', this._onResize);
   };
-
   ShootoutMatch.prototype._evtPoint = function (e) {
     var rect = this.canvas.getBoundingClientRect();
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
   };
 
   ShootoutMatch.prototype._pointerDown = function (e) {
-    if (this.phase !== 'aim') return;
-    var p = this._evtPoint(e);
-    var d = Math.hypot(p.x - this.ball.x, p.y - this.ball.y);
-    if (d > this.ballHome.r * 3.5) return; // must grab near the ball
-    this._dragging = true;
-    this._drag = p;
     Sound && Sound.unlock && Sound.unlock();
+    if (this.phase === 'aim') {
+      var p = this._evtPoint(e);
+      if (Math.hypot(p.x - this.ball.x, p.y - this.ball.y) > this.ballR * 4) return;
+      this._dragging = true;
+      this._drag = p;
+    } else if (this.phase === 'dive') {
+      var q = this._evtPoint(e);
+      var third = q.x < this.W / 3 ? 'L' : q.x > this.W * 2 / 3 ? 'R' : 'C';
+      this._commitDefense(third);
+    }
   };
   ShootoutMatch.prototype._pointerMove = function (e) {
-    if (!this._dragging) return;
-    this._drag = this._evtPoint(e);
+    if (this._dragging) this._drag = this._evtPoint(e);
   };
   ShootoutMatch.prototype._pointerUp = function () {
     if (!this._dragging) return;
@@ -138,158 +150,198 @@
     this._fireFromDrag();
   };
 
-  ShootoutMatch.prototype._fireFromDrag = function () {
+  ShootoutMatch.prototype._dragToAim = function () {
     var dx = this._drag.x - this.ballHome.x;
-    var dyUp = this.ballHome.y - this._drag.y; // upward positive
-    if (dyUp < this.maxDrag * 0.12) { this._drag = null; return; } // too small, ignore
+    var dyUp = this.ballHome.y - this._drag.y;
     var dist = Math.min(Math.hypot(dx, dyUp), this.maxDrag);
-    var power = T.clamp(dist / this.maxDrag, 0.2, 1);
-    var aimX = T.clamp(dx / (this.W * 0.34), -1, 1);
-    var aimY = T.clamp((dyUp - this.maxDrag * 0.12) / (this.maxDrag * 0.85), 0, 1);
+    return {
+      x: T.clamp(dx / (this.W * 0.34), -1, 1),
+      y: T.clamp((dyUp - this.maxDrag * 0.10) / (this.maxDrag * 0.85), 0, 1),
+      power: T.clamp(dist / this.maxDrag, 0.2, 1),
+      dyUp: dyUp
+    };
+  };
+
+  ShootoutMatch.prototype._fireFromDrag = function () {
+    var a = this._dragToAim();
+    if (a.dyUp < this.maxDrag * 0.12) { this._drag = null; return; } // too small, ignore
     this._drag = null;
-    this._playerShoot({ x: aimX, y: aimY, power: power });
+    this._playerShoot({ x: a.x, y: a.y, power: a.power });
   };
 
   // --- turn flow -------------------------------------------------------------
   ShootoutMatch.prototype._nextTurn = function () {
     if (T.isComplete(this.state)) { this._finish(); return; }
     this.onUpdate(this.state);
+    this._trail = [];
+    this.ball = { x: this.ballHome.x, y: this.ballHome.y, rot: 0 };
     if (this.state.turn === 'A') {
       this.phase = 'aim';
-      this.ball = { x: this.ballHome.x, y: this.ballHome.y };
+      this._keeper = { pose: 'ready', t: 0, kit: 'opp' };
     } else {
-      this._opponentShoot();
+      this._beginDefense();
     }
   };
 
-  // Resolve a player's shot into goal / save / miss / post.
+  // ===== ATTACK ==============================================================
   ShootoutMatch.prototype._resolvePlayerShot = function (shot) {
-    // Miss risk grows toward corners, the crossbar, and with raw power.
-    var edge = Math.max(Math.abs(shot.x) - 0.78, 0) / 0.22;     // 0..1 near posts
-    var high = Math.max(shot.y - 0.72, 0) / 0.28;               // 0..1 near bar
-    var powerRisk = Math.max(shot.power - 0.85, 0) / 0.15;
-    var missChance = T.clamp(0.04 + edge * 0.45 + high * 0.5 + powerRisk * 0.2, 0, 0.85);
-    if (this.rng() < missChance) {
-      // wide or over — nudge the visible target outside the frame
-      var ox = shot.x + (shot.x >= 0 ? 0.25 : -0.25);
-      var oy = shot.y + (high > 0 ? 0.25 : 0.05);
-      return { result: shot.y > 0.8 ? 'over' : 'wide', target: { x: ox, y: oy } };
+    var t = root.Config.TUNING;
+    // Miss only on genuinely extreme swipes.
+    if (Math.abs(shot.x) > t.MISS_EDGE_X) {
+      var pw = t.MISS_MAX_CHANCE * (Math.abs(shot.x) - t.MISS_EDGE_X) / (1 - t.MISS_EDGE_X);
+      if (this.rng() < pw) {
+        return { result: 'wide', target: { x: shot.x + (shot.x >= 0 ? 0.22 : -0.22), y: shot.y } };
+      }
     }
-    // Post hit if right on the woodwork.
-    if (Math.abs(Math.abs(shot.x) - 0.92) < 0.04 && this.rng() < 0.4) {
-      return { result: 'post', target: { x: shot.x, y: shot.y } };
+    if (shot.y > t.MISS_HIGH_Y) {
+      var po = t.MISS_MAX_CHANCE * (shot.y - t.MISS_HIGH_Y) / (1 - t.MISS_HIGH_Y);
+      if (this.rng() < po) {
+        return { result: 'over', target: { x: shot.x, y: shot.y + 0.25 } };
+      }
     }
-    // Keeper attempts the save.
-    var dive = Keeper.decideDive(this.keeperB, shot, this.rng);
-    var dpoint = dive; // normalized
-    var dist = Math.hypot(shot.x - dpoint.diveX, shot.y - dpoint.diveY);
-    var saved = dist < dive.reach;
+    // Woodwork.
+    if (Math.abs(shot.x) > 0.88 && this.rng() < t.POST_CHANCE) {
+      return { result: 'post', target: { x: shot.x * 0.97, y: shot.y } };
+    }
+    // Keeper third-guess save model.
+    var shotThird = Keeper.thirdOf(shot.x);
+    var corner = Keeper.cornerness(shot);
+    var keeperThird = Keeper.aiPickThird(this.keeperB, this.roundIndex, shotThird, this.rng);
+    var correct = keeperThird === shotThird;
+    var saveP = Keeper.saveProbability(this.keeperB, this.roundIndex, correct, corner, 'attack');
+    var saved = this.rng() < saveP;
     return {
       result: saved ? 'save' : 'goal',
       target: { x: shot.x, y: shot.y },
-      dive: dive
+      keeperThird: keeperThird,
+      shotThird: shotThird
     };
   };
 
   ShootoutMatch.prototype._playerShoot = function (shot) {
-    var info = this._resolvePlayerShot(shot);
     var self = this;
+    var info = this._resolvePlayerShot(shot);
     this.phase = 'flying';
     Sound && Sound.play('kick');
     var to = this._goalPoint(info.target.x, info.target.y);
-    var dur = 400 / this.timeScale;
-    // keeper dive target for animation
-    if (info.dive) this._keeperDive = this._goalPoint(info.dive.diveX, info.dive.diveY);
-    else this._keeperDive = null;
+    var dur = 430 / this.timeScale;
 
-    this._animate(this.ball, to, dur, function () {
+    // keeper dives to its chosen third; if it saves, it meets the ball.
+    var kThird = info.keeperThird || Keeper.thirdOf(info.target.x);
+    var diveTo = this._goalPoint(THIRD_X[kThird], info.result === 'save' ? info.target.y : 0.4 + this.rng() * 0.3);
+    if (info.result === 'save') diveTo = to; // glove meets ball
+    this._keeper = { pose: kThird, t: 0, kit: 'opp', toX: diveTo.x, toY: diveTo.y };
+    this._animKeeper(dur);
+
+    this._animateBall(to, dur, function () {
       self._applyResult('A', info, shot);
     });
   };
 
-  ShootoutMatch.prototype._opponentShoot = function () {
-    this.phase = 'opponent';
+  // ===== DEFENCE (you pick the dive) =========================================
+  ShootoutMatch.prototype._beginDefense = function () {
     var self = this;
-    // AI placement: aims for a corner, accuracy scales with team strength.
+    // AI opponent picks a shot: stronger teams aim corners more.
     var skill = (this.teamB.rating - 50) / 49;
-    var side = this.rng() < 0.5 ? -1 : 1;
-    var sx = side * (0.4 + this.rng() * 0.5);
-    var sy = 0.2 + this.rng() * 0.6;
-    var shot = { x: sx, y: sy, power: 0.7 };
-    // Does player's keeper (auto) save? Use the scoring model + a save roll.
-    var p = T.goalProbability(this.teamB.rating, this.keeperA);
-    var scored = this.rng() < p;
-    var info;
-    if (!scored) {
-      // show a save: keeper dives toward the ball
-      info = { result: 'save', target: { x: sx, y: sy },
-               dive: { diveX: sx + (this.rng() * 0.2 - 0.1), diveY: sy } };
-      this._keeperDive = this._goalPoint(info.dive.diveX, info.dive.diveY);
-    } else {
-      info = { result: 'goal', target: { x: sx, y: sy } };
-      // keeper dives the wrong way
-      this._keeperDive = this._goalPoint(-side * (0.4 + this.rng() * 0.4), this.rng() * 0.6);
-    }
-    this.ball = { x: this.ballHome.x, y: this.ballHome.y };
+    var aimCorner = this.rng() < (0.45 + skill * 0.4);
+    var third = ['L', 'C', 'R'][Math.floor(this.rng() * 3)];
+    if (!aimCorner) third = this.rng() < 0.5 ? 'C' : third;
+    var sx = THIRD_X[third] + (this.rng() * 0.2 - 0.1);
+    var sy = aimCorner ? (0.45 + this.rng() * 0.4) : (0.15 + this.rng() * 0.4);
+    this._oppShot = { x: T.clamp(sx, -0.95, 0.95), y: T.clamp(sy, 0, 0.98), third: third };
+
+    this.phase = 'dive';
+    this._keeper = { pose: 'ready', t: 0, kit: 'mine' };
+    this._diveDeadline = (root.performance ? performance.now() : Date.now()) + root.Config.TUNING.DIVE_TIMER_MS;
+    if (this._diveTimer) clearTimeout(this._diveTimer);
+    this._diveTimer = setTimeout(function () {
+      if (self.phase === 'dive') self._commitDefense(['L', 'C', 'R'][Math.floor(self.rng() * 3)]);
+    }, root.Config.TUNING.DIVE_TIMER_MS);
+  };
+
+  ShootoutMatch.prototype._commitDefense = function (playerThird) {
+    if (this.phase !== 'dive') return;
+    if (this._diveTimer) { clearTimeout(this._diveTimer); this._diveTimer = null; }
+    var self = this;
+    var opp = this._oppShot;
+    var correct = playerThird === opp.third;
+    var corner = Keeper.cornerness(opp);
+    var saveP = Keeper.saveProbability(this.keeperA, this.roundIndex, correct, corner, 'defense');
+    var saved = this.rng() < saveP;
+    var info = { result: saved ? 'save' : 'goal', target: { x: opp.x, y: opp.y }, playerThird: playerThird };
+
+    this.phase = 'oppflying';
     Sound && Sound.play('kick');
-    var to = this._goalPoint(shot.x, shot.y);
-    this._animate(this.ball, to, 600, function () { // compressed ~1s incl. result hold
-      self._applyResult('B', info, shot);
+    var to = this._goalPoint(opp.x, opp.y);
+    var diveTo = saved ? to : this._goalPoint(THIRD_X[playerThird], 0.4);
+    this._keeper = { pose: playerThird, t: 0, kit: 'mine', toX: diveTo.x, toY: diveTo.y };
+    var dur = 560; // compressed
+    this._animKeeper(dur);
+    this._animateBall(to, dur, function () {
+      self._applyResult('B', info, opp);
     });
   };
 
-  // Apply a resolved kick: maybe offer a retake, else commit to the engine.
+  // ===== result handling =====================================================
   ShootoutMatch.prototype._applyResult = function (side, info, shot) {
     var self = this;
     this.phase = 'result';
     var scored = info.result === 'goal';
 
-    // juice
     if (info.result === 'goal') { Sound && Sound.play('goal'); this._netRipple = 1; }
-    else if (info.result === 'save') { Sound && Sound.play('save'); this.shake = 1; }
+    else if (info.result === 'save') { Sound && Sound.play('save'); this.shake = 0.8; }
     else if (info.result === 'post') { Sound && Sound.play('post'); this.shake = 1; }
     else { Sound && Sound.play('miss'); }
 
+    this.banner = { text: this._label(side, info.result), good: side === 'A' ? scored : !scored, until: 0 };
     this.onKickResult({ side: side, result: info.result, scored: scored, state: this.state });
 
     var commit = function () {
-      // Tournament-winning kick gets slow-mo + zoom before finishing.
+      self.banner = null;
       if (side === 'A' && scored && self._wouldWinTournament()) {
         self.timeScale = 0.35;
         if (self.onWinningKick) self.onWinningKick();
       }
       T.recordKick(self.state, scored);
       self.timeScale = 1;
-      setTimeout(function () { self._nextTurn(); }, side === 'B' ? 350 : 550);
+      setTimeout(function () { self._nextTurn(); }, 250);
     };
 
-    // Rewarded-ad retake: only for the player, on a FAILED kick, once per match.
+    // Rewarded-ad retake: player only, FAILED kick, once per match.
     if (side === 'A' && !scored && this.allowRetake && !this.retakeUsed && this.onRetakeOffer) {
       this.phase = 'paused';
-      this.onRetakeOffer(function (granted) {
-        if (granted) {
-          self.retakeUsed = true;
-          self.ball = { x: self.ballHome.x, y: self.ballHome.y };
-          self._keeperDive = null;
-          self.phase = 'aim'; // shoot again WITHOUT recording the miss
-        } else {
-          commit();
-        }
-      });
+      setTimeout(function () {
+        self.onRetakeOffer(function (granted) {
+          self.banner = null;
+          if (granted) {
+            self.retakeUsed = true;
+            self._trail = [];
+            self.ball = { x: self.ballHome.x, y: self.ballHome.y, rot: 0 };
+            self._keeper = { pose: 'ready', t: 0, kit: 'opp' };
+            self.phase = 'aim'; // shoot again WITHOUT recording the miss
+          } else { commit(); }
+        });
+      }, 800); // brief freeze so the miss reads first
       return;
     }
-    setTimeout(commit, 700);
+    setTimeout(commit, 850); // freeze on the result so it reads
   };
 
-  // Would the player scoring this kick decide a tournament-winning final?
+  ShootoutMatch.prototype._label = function (side, result) {
+    if (result === 'goal') return side === 'A' ? 'GOAL!' : 'CONCEDED';
+    if (result === 'save') return side === 'A' ? 'SAVED!' : 'SAVED!';
+    if (result === 'post') return 'OFF THE POST!';
+    if (result === 'wide') return 'MISS — WIDE';
+    if (result === 'over') return 'MISS — OVER THE BAR';
+    return '';
+  };
+
   ShootoutMatch.prototype._wouldWinTournament = function () {
     if (!this.isFinalKickPotential) return false;
     var s = this.state;
     if (s.mode !== 'knockout') return false;
-    // simulate: A scores now
     var remB = Math.max(0, 5 - s.kb);
     if (s.phase === 'active') return (s.a + 1) > s.b + remB;
-    if (s.phase === 'suddendeath') return false; // decided after B kicks
     return false;
   };
 
@@ -299,9 +351,12 @@
     this.onEnd(this.state);
   };
 
-  // --- animation + render ----------------------------------------------------
-  ShootoutMatch.prototype._animate = function (obj, to, dur, done) {
-    this._anim = { obj: obj, from: { x: obj.x, y: obj.y }, to: to, dur: dur, t: 0, done: done };
+  // --- animation -------------------------------------------------------------
+  ShootoutMatch.prototype._animateBall = function (to, dur, done) {
+    this._anim = { from: { x: this.ball.x, y: this.ball.y }, to: to, dur: dur, t: 0, done: done };
+  };
+  ShootoutMatch.prototype._animKeeper = function (dur) {
+    this._keeperAnim = { dur: dur * 0.85, t: 0 };
   };
 
   ShootoutMatch.prototype._loop = function (ts) {
@@ -312,10 +367,20 @@
     if (this._anim) {
       this._anim.t += dt;
       var k = T.clamp(this._anim.t / this._anim.dur, 0, 1);
-      var e = 1 - Math.pow(1 - k, 2); // ease-out
-      this._anim.obj.x = this._anim.from.x + (this._anim.to.x - this._anim.from.x) * e;
-      this._anim.obj.y = this._anim.from.y + (this._anim.to.y - this._anim.from.y) * e;
+      var e = 1 - Math.pow(1 - k, 2);
+      var px = this.ball.x, py = this.ball.y;
+      this.ball.x = this._anim.from.x + (this._anim.to.x - this._anim.from.x) * e;
+      this.ball.y = this._anim.from.y + (this._anim.to.y - this._anim.from.y) * e;
+      var moved = Math.hypot(this.ball.x - px, this.ball.y - py);
+      this.ball.rot += moved * 0.04;
+      this._trail.push({ x: this.ball.x, y: this.ball.y });
+      if (this._trail.length > 14) this._trail.shift();
       if (k >= 1) { var d = this._anim.done; this._anim = null; d && d(); }
+    }
+    if (this._keeperAnim) {
+      this._keeperAnim.t += dt;
+      this._keeper.t = T.clamp(this._keeperAnim.t / this._keeperAnim.dur, 0, 1);
+      if (this._keeper.t >= 1) this._keeperAnim = null;
     }
     if (this.shake > 0) this.shake = Math.max(0, this.shake - dt / 260);
     if (this._netRipple > 0) this._netRipple = Math.max(0, this._netRipple - dt / 500);
@@ -324,6 +389,7 @@
     this._raf = requestAnimationFrame(this._loop);
   };
 
+  // --- rendering -------------------------------------------------------------
   ShootoutMatch.prototype._render = function () {
     var c = this.ctx, W = this.W, H = this.H, g = this.goal;
     c.save();
@@ -334,133 +400,297 @@
 
     // pitch-night background
     var bg = c.createLinearGradient(0, 0, 0, H);
-    bg.addColorStop(0, '#0a1f14');
-    bg.addColorStop(0.5, '#0c2a18');
-    bg.addColorStop(1, '#06150d');
+    bg.addColorStop(0, '#07251a');
+    bg.addColorStop(0.45, '#0a2c1c');
+    bg.addColorStop(1, '#05140d');
     c.fillStyle = bg;
-    c.fillRect(-20, -20, W + 40, H + 40);
+    c.fillRect(-30, -30, W + 60, H + 60);
 
-    // pitch stripes
-    c.fillStyle = 'rgba(255,255,255,0.025)';
+    // pitch mow stripes below the line
     for (var i = 0; i < 8; i++) {
-      if (i % 2 === 0) c.fillRect(0, g.line + i * (H - g.line) / 8, W, (H - g.line) / 8);
+      c.fillStyle = i % 2 ? 'rgba(255,255,255,0.018)' : 'rgba(0,0,0,0.05)';
+      c.fillRect(0, g.line + i * (H - g.line) / 8, W, (H - g.line) / 8 + 1);
     }
+    // penalty spot
+    c.fillStyle = 'rgba(255,255,255,0.5)';
+    c.beginPath(); c.arc(this.ballHome.x, this.ballHome.y + this.ballR * 1.6, 3, 0, 7); c.fill();
 
-    // goal net
     this._drawGoal(c, g);
+    if (this.phase === 'aim' || this.phase === 'dive') this._drawThirds(c, g);
 
-    // keeper
     this._drawKeeper(c, g);
 
-    // aim guide while dragging
-    if (this.phase === 'aim' && this._dragging && this._drag) {
-      var dx = this._drag.x - this.ballHome.x;
-      var dyUp = this.ballHome.y - this._drag.y;
-      var dist = Math.min(Math.hypot(dx, dyUp), this.maxDrag);
-      var pow = T.clamp(dist / this.maxDrag, 0.2, 1);
-      var aimX = T.clamp(dx / (W * 0.34), -1, 1);
-      var aimY = T.clamp((dyUp - this.maxDrag * 0.12) / (this.maxDrag * 0.85), 0, 1);
-      var tgt = this._goalPoint(aimX, aimY);
-      c.strokeStyle = 'rgba(247,201,72,0.85)';
-      c.lineWidth = 3;
-      c.setLineDash([8, 7]);
-      c.beginPath(); c.moveTo(this.ballHome.x, this.ballHome.y); c.lineTo(tgt.x, tgt.y); c.stroke();
-      c.setLineDash([]);
-      // target reticle
-      c.strokeStyle = 'rgba(247,201,72,0.95)';
-      c.lineWidth = 2;
-      c.beginPath(); c.arc(tgt.x, tgt.y, 13, 0, Math.PI * 2); c.stroke();
-      // power bar
-      this._drawPowerBar(c, pow);
+    // ball trail
+    for (var ti = 0; ti < this._trail.length; ti++) {
+      var pt = this._trail[ti];
+      var a = (ti / this._trail.length) * 0.4;
+      c.fillStyle = 'rgba(255,255,255,' + a + ')';
+      c.beginPath(); c.arc(pt.x, pt.y, this.ballR * (0.4 + 0.5 * ti / this._trail.length), 0, 7); c.fill();
     }
 
-    // ball
-    this._drawBall(c, this.ball.x, this.ball.y, this.ballHome.r);
+    if (this.phase === 'aim' && this._dragging && this._drag) this._drawAim(c);
 
+    this._drawBall(c, this.ball.x, this.ball.y, this.ballR, this.ball.rot);
     c.restore();
 
-    // hint text
-    if (this.phase === 'aim' && !this._dragging) {
-      c.fillStyle = 'rgba(255,255,255,0.55)';
-      c.font = '600 ' + Math.round(W * 0.04) + 'px Archivo, sans-serif';
-      c.textAlign = 'center';
-      c.fillText('Drag the ball to aim · release to shoot', W / 2, H * 0.95);
-    } else if (this.phase === 'opponent') {
-      c.fillStyle = 'rgba(255,255,255,0.55)';
-      c.font = '600 ' + Math.round(W * 0.04) + 'px Archivo, sans-serif';
-      c.textAlign = 'center';
-      c.fillText(this.teamB.name + ' to kick…', W / 2, H * 0.95);
-    }
+    // overlays (not shaken)
+    if (this.phase === 'dive') this._drawDivePrompt(c);
+    if (this.banner) this._drawBanner(c);
+    this._drawHint(c);
   };
 
   ShootoutMatch.prototype._drawGoal = function (c, g) {
     // net
     c.save();
-    c.strokeStyle = 'rgba(255,255,255,0.16)';
+    c.strokeStyle = 'rgba(255,255,255,0.13)';
     c.lineWidth = 1;
-    var cols = 14, rows = 8;
-    var rip = this._netRipple || 0;
+    var cols = 16, rows = 9, rip = this._netRipple || 0;
     for (var i = 0; i <= cols; i++) {
-      var x = g.left + (g.width) * (i / cols);
+      var x = g.left + g.width * (i / cols);
       c.beginPath(); c.moveTo(x, g.top); c.lineTo(x, g.line); c.stroke();
     }
     for (var j = 0; j <= rows; j++) {
-      var y = g.top + (g.height) * (j / rows) - rip * 4 * Math.sin(j);
+      var y = g.top + g.height * (j / rows) - rip * 4 * Math.sin(j);
       c.beginPath(); c.moveTo(g.left, y); c.lineTo(g.right, y); c.stroke();
     }
     c.restore();
-    // posts + bar
-    c.strokeStyle = '#f4f4f4';
-    c.lineWidth = Math.max(4, this.W * 0.012);
+    // frame: posts + crossbar with subtle 3D
+    var lw = Math.max(5, this.W * 0.016);
+    c.lineCap = 'round';
+    c.strokeStyle = '#eef2f0';
+    c.lineWidth = lw;
     c.beginPath();
     c.moveTo(g.left, g.line); c.lineTo(g.left, g.top);
     c.lineTo(g.right, g.top); c.lineTo(g.right, g.line);
     c.stroke();
+    c.strokeStyle = 'rgba(0,0,0,0.25)';
+    c.lineWidth = 2;
+    c.beginPath(); c.moveTo(g.left + lw / 2, g.top + lw / 2); c.lineTo(g.right - lw / 2, g.top + lw / 2); c.stroke();
   };
 
-  ShootoutMatch.prototype._drawKeeper = function (c, g) {
-    var pos;
-    if (this._keeperDive && (this.phase === 'flying' || this.phase === 'result' || this.phase === 'opponent')) {
-      pos = this._keeperDive;
-    } else {
-      pos = this._goalPoint(0, 0.15); // resting, slightly off the line
+  // faint vertical bands marking the three target thirds
+  ShootoutMatch.prototype._drawThirds = function (c, g) {
+    c.save();
+    var third = g.width / 3;
+    for (var i = 0; i < 3; i++) {
+      c.fillStyle = i === 1 ? 'rgba(247,201,72,0.05)' : 'rgba(247,201,72,0.08)';
+      c.fillRect(g.left + i * third, g.top, third, g.height);
+      c.strokeStyle = 'rgba(247,201,72,0.18)';
+      c.lineWidth = 1;
+      c.strokeRect(g.left + i * third + 1, g.top + 1, third - 2, g.height - 2);
     }
-    var w = g.width * 0.14, h = g.height * 0.55;
-    c.save();
-    c.fillStyle = '#f7c948';
-    c.strokeStyle = '#1a1a1a';
-    c.lineWidth = 2;
-    // body
-    c.beginPath();
-    c.ellipse(pos.x, pos.y - h * 0.25, w * 0.5, h * 0.5, 0, 0, Math.PI * 2);
-    c.fill(); c.stroke();
-    // gloves
-    c.fillStyle = '#fff';
-    c.beginPath(); c.arc(pos.x - w * 0.55, pos.y - h * 0.35, w * 0.18, 0, Math.PI * 2); c.fill();
-    c.beginPath(); c.arc(pos.x + w * 0.55, pos.y - h * 0.35, w * 0.18, 0, Math.PI * 2); c.fill();
     c.restore();
   };
 
-  ShootoutMatch.prototype._drawBall = function (c, x, y, r) {
+  ShootoutMatch.prototype._drawAim = function (c) {
+    var a = this._dragToAim();
+    var tgt = this._goalPoint(a.x, a.y);
+    var bx = this.ballHome.x, by = this.ballHome.y;
+    // trajectory arrow (slight arc)
     c.save();
-    c.fillStyle = '#fff';
-    c.strokeStyle = '#222';
-    c.lineWidth = 2;
-    c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill(); c.stroke();
-    // simple pentagon accent
-    c.fillStyle = '#222';
-    c.beginPath(); c.arc(x, y, r * 0.32, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = 'rgba(247,201,72,0.9)';
+    c.lineWidth = 4; c.lineCap = 'round';
+    var midx = (bx + tgt.x) / 2, midy = (by + tgt.y) / 2 - 40;
+    c.beginPath();
+    c.moveTo(bx, by);
+    c.quadraticCurveTo(midx, midy, tgt.x, tgt.y);
+    c.stroke();
+    // arrowhead
+    var ang = Math.atan2(tgt.y - midy, tgt.x - midx);
+    c.fillStyle = 'rgba(247,201,72,0.95)';
+    c.beginPath();
+    c.moveTo(tgt.x, tgt.y);
+    c.lineTo(tgt.x - 14 * Math.cos(ang - 0.4), tgt.y - 14 * Math.sin(ang - 0.4));
+    c.lineTo(tgt.x - 14 * Math.cos(ang + 0.4), tgt.y - 14 * Math.sin(ang + 0.4));
+    c.closePath(); c.fill();
+    // reticle
+    c.strokeStyle = 'rgba(247,201,72,0.95)'; c.lineWidth = 2.5;
+    c.beginPath(); c.arc(tgt.x, tgt.y, 15, 0, 7); c.stroke();
+    c.beginPath(); c.moveTo(tgt.x - 22, tgt.y); c.lineTo(tgt.x + 22, tgt.y);
+    c.moveTo(tgt.x, tgt.y - 22); c.lineTo(tgt.x, tgt.y + 22); c.stroke();
     c.restore();
+    // power bar
+    this._drawPowerBar(c, a.power);
   };
 
   ShootoutMatch.prototype._drawPowerBar = function (c, pow) {
-    var W = this.W, H = this.H;
-    var bw = W * 0.5, bh = 10, bx = (W - bw) / 2, by = H * 0.91;
-    c.fillStyle = 'rgba(255,255,255,0.15)';
-    c.fillRect(bx, by, bw, bh);
-    var col = pow > 0.85 ? '#ff5a5a' : '#f7c948';
-    c.fillStyle = col;
+    var W = this.W, H = this.H, bw = W * 0.5, bh = 9, bx = (W - bw) / 2, by = H * 0.945;
+    c.fillStyle = 'rgba(0,0,0,0.4)'; c.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
+    c.fillStyle = 'rgba(255,255,255,0.15)'; c.fillRect(bx, by, bw, bh);
+    c.fillStyle = pow > 0.88 ? '#ff5a5a' : '#f7c948';
     c.fillRect(bx, by, bw * pow, bh);
+  };
+
+  // --- ball ------------------------------------------------------------------
+  ShootoutMatch.prototype._drawBall = function (c, x, y, r, rot) {
+    c.save();
+    // ground shadow
+    c.fillStyle = 'rgba(0,0,0,0.28)';
+    c.beginPath(); c.ellipse(x, y + r * 0.92, r * 0.95, r * 0.32, 0, 0, 7); c.fill();
+
+    c.translate(x, y);
+    c.rotate(rot || 0);
+    // base sphere with shading
+    var grad = c.createRadialGradient(-r * 0.35, -r * 0.4, r * 0.2, 0, 0, r);
+    grad.addColorStop(0, '#ffffff');
+    grad.addColorStop(0.75, '#eef0f2');
+    grad.addColorStop(1, '#c7ccd1');
+    c.fillStyle = grad;
+    c.beginPath(); c.arc(0, 0, r, 0, 7); c.fill();
+    c.lineWidth = 1.5; c.strokeStyle = 'rgba(0,0,0,0.25)';
+    c.beginPath(); c.arc(0, 0, r, 0, 7); c.stroke();
+
+    // classic black pentagon panels: one centre + five around
+    c.fillStyle = '#14181c';
+    drawPentagon(c, 0, 0, r * 0.34, -Math.PI / 2);
+    for (var k = 0; k < 5; k++) {
+      var ang = -Math.PI / 2 + k * (Math.PI * 2 / 5);
+      var px = Math.cos(ang) * r * 0.62, py = Math.sin(ang) * r * 0.62;
+      drawPentagon(c, px, py, r * 0.20, ang + Math.PI);
+    }
+    // glossy highlight
+    c.fillStyle = 'rgba(255,255,255,0.35)';
+    c.beginPath(); c.ellipse(-r * 0.35, -r * 0.4, r * 0.3, r * 0.18, -0.6, 0, 7); c.fill();
+    c.restore();
+  };
+
+  function drawPentagon(c, cx, cy, rad, rot) {
+    c.beginPath();
+    for (var i = 0; i < 5; i++) {
+      var a = rot + i * (Math.PI * 2 / 5);
+      var x = cx + Math.cos(a) * rad, y = cy + Math.sin(a) * rad;
+      if (i === 0) c.moveTo(x, y); else c.lineTo(x, y);
+    }
+    c.closePath(); c.fill();
+  }
+
+  // --- keeper ----------------------------------------------------------------
+  ShootoutMatch.prototype._drawKeeper = function (c, g) {
+    var k = this._keeper;
+    var baseX = (g.left + g.right) / 2;
+    var baseY = g.line; // stands on the line
+    var scale = g.height * 0.012; // overall size unit
+    var u = Math.max(2.4, scale);
+
+    // position: lerp toward dive target as t grows
+    var tx = baseX, ty = baseY - u * 9;
+    var lean = 0, reach = 0;
+    if (k.pose === 'L' || k.pose === 'R' || k.pose === 'C') {
+      var prog = k.t || 0;
+      if (k.toX != null) { tx = baseX + (k.toX - baseX) * prog; }
+      else { tx = baseX + THIRD_X[k.pose] * (g.width * 0.42) * prog; }
+      ty = (baseY - u * 9) + ((k.toY != null ? k.toY : baseY - u * 9) - (baseY - u * 9)) * prog * 0.6;
+      lean = (k.pose === 'L' ? -1 : k.pose === 'R' ? 1 : 0) * prog * 0.8;
+      reach = prog;
+    }
+
+    var kit = k.kit === 'mine'
+      ? { jersey: '#f7c948', dark: '#caa029', short: '#1c1c1c' }
+      : { jersey: '#1fb6c9', dark: '#127584', short: '#10333a' };
+
+    c.save();
+    c.translate(tx, ty);
+    c.rotate(lean * 0.5);
+
+    // shadow
+    c.fillStyle = 'rgba(0,0,0,0.25)';
+    c.beginPath(); c.ellipse(0, u * 9.5, u * 5, u * 1.4, 0, 0, 7); c.fill();
+
+    var armSpread = (k.pose === 'C') ? 0 : reach;
+    // legs
+    c.strokeStyle = kit.short; c.lineCap = 'round'; c.lineWidth = u * 1.8;
+    c.beginPath();
+    c.moveTo(-u * 1.1, u * 4); c.lineTo(-u * 1.6 - armSpread * u * 1.5, u * 9);
+    c.moveTo(u * 1.1, u * 4); c.lineTo(u * 1.6 + armSpread * u * 1.5, u * 9);
+    c.stroke();
+    // shorts
+    c.fillStyle = kit.short;
+    roundRect(c, -u * 2, u * 2.2, u * 4, u * 2.6, u * 0.8); c.fill();
+    // torso (jersey)
+    c.fillStyle = kit.jersey;
+    roundRect(c, -u * 2.4, -u * 3.4, u * 4.8, u * 6, u * 1.4); c.fill();
+    c.fillStyle = kit.dark; // side shading
+    roundRect(c, u * 1.2, -u * 3.4, u * 1.2, u * 6, u * 0.6); c.fill();
+
+    // arms + gloves: spread toward the dive
+    var ay = -u * 2 - reach * u * 1.5;
+    c.strokeStyle = kit.jersey; c.lineWidth = u * 1.5;
+    var lx = -u * 2.4 - armSpread * u * 5.5, rx = u * 2.4 + armSpread * u * 5.5;
+    c.beginPath();
+    c.moveTo(-u * 1.8, -u * 2.4); c.lineTo(lx, ay);
+    c.moveTo(u * 1.8, -u * 2.4); c.lineTo(rx, ay);
+    c.stroke();
+    // gloves
+    c.fillStyle = '#ffffff'; c.strokeStyle = '#2a2a2a'; c.lineWidth = 1.5;
+    c.beginPath(); c.arc(lx, ay, u * 1.25, 0, 7); c.fill(); c.stroke();
+    c.beginPath(); c.arc(rx, ay, u * 1.25, 0, 7); c.fill(); c.stroke();
+
+    // head
+    c.fillStyle = '#e7b58c';
+    c.beginPath(); c.arc(0, -u * 5.4, u * 1.7, 0, 7); c.fill();
+    c.fillStyle = '#3a2a1c'; // hair
+    c.beginPath(); c.arc(0, -u * 5.9, u * 1.7, Math.PI, 0); c.fill();
+
+    c.restore();
+  };
+
+  function roundRect(c, x, y, w, h, r) {
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+  }
+
+  // --- prompts / banners -----------------------------------------------------
+  ShootoutMatch.prototype._drawDivePrompt = function (c) {
+    var W = this.W, H = this.H;
+    var now = (root.performance ? performance.now() : Date.now());
+    var left = Math.max(0, this._diveDeadline - now);
+    var frac = left / root.Config.TUNING.DIVE_TIMER_MS;
+
+    // three tappable zones
+    var third = this.goal.width / 3, labels = ['DIVE LEFT', 'STAY', 'DIVE RIGHT'];
+    c.save();
+    c.font = '800 ' + Math.round(W * 0.032) + 'px Archivo, sans-serif';
+    c.textAlign = 'center';
+    for (var i = 0; i < 3; i++) {
+      var cx = this.goal.left + third * (i + 0.5);
+      c.fillStyle = 'rgba(247,201,72,0.85)';
+      c.fillText(labels[i], cx, this.goal.line + 28);
+    }
+    // prompt + timer bar
+    c.fillStyle = '#fff';
+    c.font = '900 ' + Math.round(W * 0.06) + 'px "Archivo Black", Archivo, sans-serif';
+    c.fillText('DIVE!', W / 2, H * 0.66);
+    var bw = W * 0.5, bx = (W - bw) / 2, by = H * 0.69;
+    c.fillStyle = 'rgba(255,255,255,0.18)'; c.fillRect(bx, by, bw, 7);
+    c.fillStyle = frac < 0.3 ? '#ff5a5a' : '#f7c948'; c.fillRect(bx, by, bw * frac, 7);
+    c.restore();
+  };
+
+  ShootoutMatch.prototype._drawBanner = function (c) {
+    var W = this.W, H = this.H;
+    c.save();
+    c.textAlign = 'center';
+    c.font = '900 ' + Math.round(W * 0.085) + 'px "Archivo Black", Archivo, sans-serif';
+    c.fillStyle = this.banner.good ? '#ffd766' : '#ff5a5a';
+    c.shadowColor = 'rgba(0,0,0,0.6)'; c.shadowBlur = 14; c.shadowOffsetY = 3;
+    c.fillText(this.banner.text, W / 2, H * 0.40);
+    c.restore();
+  };
+
+  ShootoutMatch.prototype._drawHint = function (c) {
+    var W = this.W, H = this.H, msg = '';
+    if (this.phase === 'aim' && !this._dragging) msg = 'Drag the ball to aim · release to shoot';
+    else if (this.phase === 'oppflying') msg = this.teamB.name + ' shooting…';
+    if (!msg) return;
+    c.fillStyle = 'rgba(255,255,255,0.55)';
+    c.font = '600 ' + Math.round(W * 0.038) + 'px Archivo, sans-serif';
+    c.textAlign = 'center';
+    c.fillText(msg, W / 2, H * 0.98);
   };
 
   root.ShootoutMatch = ShootoutMatch;
