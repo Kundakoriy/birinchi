@@ -1,0 +1,261 @@
+/*
+ * Headless unit tests for the Penalty Cup 26 tournament engine.
+ * Run with:  node tests/tournament.test.js   (or: npm test)
+ *
+ * No test framework dependency — a tiny assert harness keeps it zero-install.
+ */
+var T = require('../js/tournament.js');
+
+var passed = 0;
+var failed = 0;
+
+function ok(cond, msg) {
+  if (cond) {
+    passed++;
+    console.log('  ✓ ' + msg);
+  } else {
+    failed++;
+    console.error('  ✗ ' + msg);
+  }
+}
+function eq(actual, expected, msg) {
+  ok(actual === expected, msg + ' (expected ' + expected + ', got ' + actual + ')');
+}
+function group(name) {
+  console.log('\n' + name);
+}
+
+// Feed a sequence of kicks into a shootout. `seq` is an array of booleans in
+// kick order (A, B, A, B, ...). Stops feeding once the shootout is decided.
+function play(mode, seq) {
+  var s = T.newShootout(mode);
+  for (var i = 0; i < seq.length; i++) {
+    T.recordKick(s, seq[i]);
+  }
+  return s;
+}
+
+// ---------------------------------------------------------------------------
+group('Knockout: early termination at 3-0 after 3 pairs');
+// A scores all 3, B misses all 3. After the 3rd pair, A leads 3-0 with B only
+// able to reach 2 -> decided. Kicks 4 and 5 must NOT be taken.
+{
+  var s = T.newShootout('knockout');
+  T.recordKick(s, true);  // A 1-0
+  T.recordKick(s, false); // B 1-0
+  T.recordKick(s, true);  // A 2-0
+  T.recordKick(s, false); // B 2-0
+  T.recordKick(s, true);  // A 3-0
+  ok(s.phase === 'active', 'not yet decided before B takes its 3rd kick');
+  T.recordKick(s, false); // B 3-0  -> decided
+  eq(s.phase, 'done', 'decided after 3rd pair');
+  eq(s.winner, 'A', 'team A wins');
+  eq(s.a, 3, 'A scored 3');
+  eq(s.b, 0, 'B scored 0');
+  eq(s.ka, 3, 'A took only 3 kicks (early termination)');
+  eq(s.kb, 3, 'B took only 3 kicks (early termination)');
+  eq(s.history.length, 6, 'exactly 6 kicks recorded, no kicks 4 or 5');
+}
+
+// ---------------------------------------------------------------------------
+group('Knockout: early termination mid-pair (decision before B kicks)');
+// A decision can also land after team A's kick, within a pair. Build a case
+// that is NOT already decided after pair 3, but becomes decided on A's 4th kick.
+{
+  var s = T.newShootout('knockout');
+  T.recordKick(s, true);  // A 1-0 (ka1)
+  T.recordKick(s, false); // B     (kb1)
+  T.recordKick(s, true);  // A 2-0 (ka2)
+  T.recordKick(s, false); // B     (kb2)
+  T.recordKick(s, false); // A 2-0 (ka3)  <- A misses, so not decided at pair 3
+  T.recordKick(s, false); // B     (kb3): a=2,b=0,remB=2 -> 2 > 2? no, active
+  ok(s.phase === 'active', 'still active after pair 3 (2-0)');
+  T.recordKick(s, true);  // A 3-0 (ka4,kb3): B max = 0+2 = 2 < 3 -> decided mid-pair
+  eq(s.phase, 'done', 'decided right after A goes 3-0 (before B kicks pair 4)');
+  eq(s.winner, 'A', 'team A wins');
+  eq(s.ka, 4, 'A took 4 kicks');
+  eq(s.kb, 3, 'B took 3 kicks (did not take its 4th)');
+}
+
+// ---------------------------------------------------------------------------
+group('Knockout: no extra kicks after decision');
+{
+  var s = play('knockout', [true, false, true, false, true, false]); // 3-0 decided
+  var beforeA = s.a, beforeB = s.b, beforeLen = s.history.length;
+  T.recordKick(s, true);  // attempt extra kick
+  T.recordKick(s, true);  // attempt another
+  eq(s.a, beforeA, 'score A unchanged after decision');
+  eq(s.b, beforeB, 'score B unchanged after decision');
+  eq(s.history.length, beforeLen, 'no further kicks recorded after decision');
+  eq(s.phase, 'done', 'still done');
+}
+
+// ---------------------------------------------------------------------------
+group('Knockout: sudden death ends on first unequal pair');
+{
+  // Regulation 5-5 (both score all five), then sudden death.
+  var seq = [];
+  for (var i = 0; i < 5; i++) { seq.push(true); seq.push(true); } // 5-5
+  var s = T.newShootout('knockout');
+  seq.forEach(function (v) { T.recordKick(s, v); });
+  eq(s.phase, 'suddendeath', 'enters sudden death at 5-5');
+  eq(s.a, 5, 'A has 5');
+  eq(s.b, 5, 'B has 5');
+
+  // SD pair 1: both score -> still tied, continue.
+  T.recordKick(s, true);  // A scores (6-5)
+  ok(s.phase === 'suddendeath', 'not decided mid-pair when A scores');
+  T.recordKick(s, true);  // B scores (6-6)
+  eq(s.phase, 'suddendeath', 'still going after an equal SD pair (6-6)');
+
+  // SD pair 2: A scores, B misses -> decided.
+  T.recordKick(s, true);  // A scores (7-6)
+  ok(s.phase === 'suddendeath', 'not decided after only A kicks in SD pair');
+  T.recordKick(s, false); // B misses -> decided
+  eq(s.phase, 'done', 'decided after first unequal SD pair');
+  eq(s.winner, 'A', 'A wins sudden death');
+  eq(s.a, 7, 'A total 7');
+  eq(s.b, 6, 'B total 6');
+}
+
+// ---------------------------------------------------------------------------
+group('Knockout: sudden death won by team B');
+{
+  var seq = [];
+  for (var i = 0; i < 5; i++) { seq.push(false); seq.push(false); } // 0-0 reg
+  var s = T.newShootout('knockout');
+  seq.forEach(function (v) { T.recordKick(s, v); });
+  eq(s.phase, 'suddendeath', '0-0 regulation -> sudden death');
+  T.recordKick(s, false); // A miss
+  T.recordKick(s, true);  // B score -> decided
+  eq(s.phase, 'done', 'decided');
+  eq(s.winner, 'B', 'B wins');
+}
+
+// ---------------------------------------------------------------------------
+group('Group match: always 5 kicks each, draws allowed, no sudden death');
+{
+  // 3-3 must be a recorded draw, not extended.
+  var s = T.newShootout('group');
+  var seq = [true, true, false, true, true, false, true, true, false, false];
+  // A: T,F,T,F,T = 3 ; B: T,T,T,F,F = 3
+  seq.forEach(function (v) { T.recordKick(s, v); });
+  eq(s.phase, 'done', 'group match completes after 5 each');
+  eq(s.ka, 5, 'A took exactly 5');
+  eq(s.kb, 5, 'B took exactly 5');
+  eq(s.winner, 'draw', '3-3 is a draw in group play');
+  eq(s.a, 3, 'A scored 3');
+  eq(s.b, 3, 'B scored 3');
+
+  // No early termination even when one side is already unreachable.
+  var s2 = T.newShootout('group');
+  [true, false, true, false, true, false].forEach(function (v) { T.recordKick(s2, v); });
+  eq(s2.phase, 'active', 'group match NOT decided at 3-0 after 3 pairs (must finish 5)');
+}
+
+// ---------------------------------------------------------------------------
+group('Standings: tiebreakers (points, GD, GF, rating) & qualification');
+{
+  var g = {
+    name: 'Group A',
+    teams: [
+      { id: 'X', name: 'X', rating: 80 },
+      { id: 'Y', name: 'Y', rating: 70 },
+      { id: 'Z', name: 'Z', rating: 60 },
+      { id: 'W', name: 'W', rating: 50 }
+    ]
+  };
+  // X beats everyone, Y & Z tie on points but Y has better GD.
+  var results = [
+    { home: 'X', away: 'Y', hg: 2, ag: 1 },
+    { home: 'X', away: 'Z', hg: 3, ag: 0 },
+    { home: 'X', away: 'W', hg: 1, ag: 0 },
+    { home: 'Y', away: 'Z', hg: 2, ag: 2 },
+    { home: 'Y', away: 'W', hg: 4, ag: 0 },
+    { home: 'Z', away: 'W', hg: 1, ag: 1 }
+  ];
+  var st = T.computeStandings(g, results);
+  eq(st[0].id, 'X', 'X tops the group');
+  eq(st[0].Pts, 9, 'X has 9 points');
+  eq(st[1].id, 'Y', 'Y second on GD over Z');
+  eq(st[2].id, 'Z', 'Z third');
+  eq(st[3].id, 'W', 'W last');
+}
+
+// ---------------------------------------------------------------------------
+group('Qualification: 12 winners + 12 runners-up + 8 best thirds = 32');
+{
+  // Fabricate 12 groups of standings with descending quality.
+  var standingsByGroup = [];
+  for (var gi = 0; gi < 12; gi++) {
+    var rows = [];
+    for (var p = 0; p < 4; p++) {
+      rows.push({
+        id: 'G' + gi + 'P' + p,
+        name: 'G' + gi + 'P' + p,
+        rating: 90 - gi - p,
+        Pts: (3 - p) * 3 - gi, // varied
+        GD: (3 - p) * 2 - gi,
+        GF: 5 - p
+      });
+    }
+    standingsByGroup.push(rows);
+  }
+  var q = T.determineQualifiers(standingsByGroup);
+  eq(q.winners.length, 12, '12 group winners');
+  eq(q.runnersUp.length, 12, '12 runners-up');
+  eq(q.thirds.length, 8, '8 best third-placed teams');
+  eq(q.qualified.length, 32, '32 qualified teams total');
+  // Every winner must be a 1st place row.
+  ok(q.winners.every(function (w) { return w.place === 1; }), 'winners tagged place=1');
+  ok(q.thirds.every(function (t) { return t.place === 3; }), 'thirds tagged place=3');
+}
+
+// ---------------------------------------------------------------------------
+group('Bracket: seed order keeps 1 & 2 apart; 32 teams -> single champion');
+{
+  var order = T.seedOrder(8);
+  eq(order.length, 8, 'seed order has 8 entries');
+  eq(order[0], 1, 'seed 1 leads the bracket');
+  // The essential property: seeds 1 & 2 sit in opposite halves and can only
+  // meet in the final; seeds 1-4 only meet in the semis.
+  ok(order.indexOf(2) >= 4, 'seed 2 is in the opposite half from seed 1');
+  // First-half semifinalists by seed: pairs (order0,order1) & (order2,order3).
+  var firstHalf = order.slice(0, 4);
+  ok(firstHalf.indexOf(1) !== -1 && firstHalf.indexOf(4) !== -1, 'seeds 1 & 4 share the top half');
+  var secondHalf = order.slice(4);
+  ok(secondHalf.indexOf(2) !== -1 && secondHalf.indexOf(3) !== -1, 'seeds 2 & 3 share the bottom half');
+
+  // Build 32 fake qualified teams and run a fully simulated knockout.
+  var qualified = [];
+  for (var i = 0; i < 32; i++) {
+    qualified.push({ id: 'T' + i, name: 'T' + i, rating: 50 + i, Pts: i, GD: i, GF: i });
+  }
+  var bracket = T.buildBracket(qualified);
+  eq(bracket.firstRound.length, 16, 'Round of 32 has 16 matches');
+  var rng = T.makeRng(12345);
+  var res = T.runKnockout(bracket.firstRound, rng);
+  eq(res.rounds.length, 5, 'five knockout rounds (R32,R16,QF,SF,Final)');
+  eq(res.rounds[0].length, 16, '16 matches in R32');
+  eq(res.rounds[4].length, 1, '1 match in the final');
+  ok(res.champion && res.champion.id, 'a single champion emerges');
+  // Top seed (1 vs 32) pairing sanity.
+  eq(bracket.firstRound[0].home.id, bracket.ranked[0].id, 'seed 1 is the top-ranked team');
+}
+
+// ---------------------------------------------------------------------------
+group('Determinism: same seed -> same simulated result');
+{
+  var a = { id: 'a', name: 'a', rating: 82 };
+  var b = { id: 'b', name: 'b', rating: 70 };
+  var r1 = T.simulateShootout(a, b, 'knockout', T.makeRng(7));
+  var r2 = T.simulateShootout(a, b, 'knockout', T.makeRng(7));
+  eq(r1.a + '-' + r1.b, r2.a + '-' + r2.b, 'identical seed gives identical score');
+  eq(r1.winner, r2.winner, 'identical seed gives identical winner');
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n--------------------------------------------------');
+console.log('  ' + passed + ' passed, ' + failed + ' failed');
+console.log('--------------------------------------------------');
+if (failed > 0) process.exit(1);

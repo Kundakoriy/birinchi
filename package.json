@@ -1,0 +1,11 @@
+{
+  "name": "penalty-cup-26",
+  "version": "0.1.0",
+  "description": "Penalty Cup 26 — portrait-first HTML5 penalty shootout World Cup (48 teams).",
+  "private": true,
+  "scripts": {
+    "test": "node tests/tournament.test.js",
+    "start": "python3 -m http.server 8080"
+  },
+  "license": "UNLICENSED"
+}
