@@ -12,6 +12,12 @@ Vanilla JS, single page, no build step. **Every match is a penalty shootout.**
 > sprites (with the path-drawn art kept as an automatic fallback) and the menu
 > uses a stadium background. Sprites are sized by real-world proportions vs the
 > goal mouth. Gameplay, swipe, dive timing and tournament flow are unchanged.
+>
+> Session 4: shot outcomes are now resolved by geometry, not probability — the
+> ball ends at its target (gx,gy) and the keeper ends at its dive point (kx,ky),
+> and it's a SAVE iff those are within the keeper's reach, so the visual always
+> matches the verdict. The keeper can dive to any region incl. the top corners.
+> The hub auto-selects the Bracket tab once the knockouts begin.
 
 ## Run it
 
@@ -60,14 +66,18 @@ Each shootout is two-sided:
   Corner shots beat the keeper; you only miss (wide/over) on genuinely extreme
   swipes. Clear outcome labels read the result ("GOAL!", "SAVED!", "MISS — WIDE",
   "MISS — OVER THE BAR", "OFF THE POST!") with a brief freeze.
-- **Defence** — when the opponent kicks, you pick which way your keeper dives
-  (tap left/centre/right, or drag) against a short timer. A save needs the right
-  third plus your keeper's rating.
+- **Defence** — when the opponent kicks, you tap where in the goal your keeper
+  should dive (anywhere, including the corners) against a short timer.
 
-The keeper rating is a function of team strength, round depth, and the team's
-results so far, shown on the match preview as a badge (Average / Good / Elite /
-World-class). Scoring is the default outcome of a decent shot (~70-80% for
-well-aimed shots in early rounds), scaling harder by round and opponent strength.
+Resolution is **geometric**, not probabilistic: the goal mouth is normalized to
+`(gx,gy)` in `[0,1]`; the keeper picks a continuous dive point `(kx,ky)` and the
+shot is **saved iff** `distance((gx,gy),(kx,ky)) <= reach`. The ball and the
+keeper always end at their real points, so what you see is the verdict. The
+keeper rating (team strength, round depth, results so far — shown as a badge on
+the match preview: Average / Good / Elite / World-class) drives the keeper's
+reach and how accurately it tracks the shot. Scoring is the default for a decent
+shot (~76% vs a mid keeper early; corners safest, dead-centre riskiest), dropping
+to ~33% against an elite keeper in the final.
 
 ### Tuning difficulty
 
@@ -129,8 +139,9 @@ Edit `js/config.js`:
 - `BUILD_TARGET`: `'gd'` | `'crazy'` | `'none'`
 - `GD_GAME_ID`: the GameDistribution game id
 - `ADS_ENABLED`, `ADS_DEBUG_FAKE`, `DEBUG`
-- `TUNING`: gameplay balance constants (conversion, keeper save chances, miss
-  thresholds, dive timer) — each commented
+- `TUNING`: gameplay balance constants — each commented. Difficulty lives in
+  `KEEPER_REACH` (+skill/round) and `KEEPER_PREDICTION` (how accurately the
+  keeper tracks the shot), plus miss thresholds and the dive timer
 - `TUNING.KEEPER_HEIGHT_RATIO` / `TUNING.BALL_DIAMETER_RATIO`: sprite sizes as a
   fraction of the rendered goal-mouth height (standing keeper ~1.85m, ball
   ~0.22m vs the 2.44m goal). All keeper sprites share one real-world scale

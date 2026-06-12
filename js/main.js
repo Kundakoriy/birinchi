@@ -142,6 +142,10 @@
 
     var cta = hubCta();
 
+    // Default tab follows the current phase: Groups during the group stage,
+    // Bracket once the knockouts begin (both stay accessible via the tabs).
+    var defaultBracket = S.groupStageDone && S.bracketRounds;
+
     setScreen(
       banner +
       '<div class="hub">' +
@@ -150,11 +154,11 @@
           statusLine +
         '</div>' +
         '<div class="tabs">' +
-          '<button class="tab active" data-tab="groups">Groups</button>' +
-          '<button class="tab" data-tab="bracket">Bracket</button>' +
+          '<button class="tab' + (defaultBracket ? '' : ' active') + '" data-tab="groups">Groups</button>' +
+          '<button class="tab' + (defaultBracket ? ' active' : '') + '" data-tab="bracket">Bracket</button>' +
         '</div>' +
-        '<div class="tab-body" id="tabGroups"><div class="groups-grid">' + groupsHtml + '</div></div>' +
-        '<div class="tab-body hidden" id="tabBracket">' + bracketHtml + '</div>' +
+        '<div class="tab-body' + (defaultBracket ? ' hidden' : '') + '" id="tabGroups"><div class="groups-grid">' + groupsHtml + '</div></div>' +
+        '<div class="tab-body' + (defaultBracket ? '' : ' hidden') + '" id="tabBracket">' + bracketHtml + '</div>' +
         cta +
       '</div>', 'screen-hub');
 

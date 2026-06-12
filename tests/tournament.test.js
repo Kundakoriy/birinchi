@@ -312,6 +312,36 @@ group('Group stage: every team plays exactly 3 (no double-counting player)');
 }
 
 // ---------------------------------------------------------------------------
+group('Geometric resolution: save iff keeper dive within reach of the shot');
+{
+  var reach = 0.30;
+  // Top-left corner shot.
+  var shot = { gx: 0.05, gy: 0.95 };
+
+  // Keeper dives bottom-right -> far away -> GOAL.
+  var diveFar = { kx: 0.90, ky: 0.10 };
+  ok(!T.isSaved(shot, diveFar, reach), 'top-left shot vs bottom-right dive is a GOAL');
+  ok(T.distance(shot.gx, shot.gy, diveFar.kx, diveFar.ky) > reach, 'distance exceeds reach');
+
+  // Keeper dives to the top-left within reach -> SAVE.
+  var diveNear = { kx: 0.08, ky: 0.92 };
+  ok(T.isSaved(shot, diveNear, reach), 'top-left shot vs top-left dive (within reach) is a SAVE');
+  ok(T.distance(shot.gx, shot.gy, diveNear.kx, diveNear.ky) <= reach, 'distance within reach');
+
+  // Just inside the reach radius -> SAVE; just outside -> GOAL (threshold check).
+  ok(T.isSaved(shot, { kx: 0.05, ky: shot.gy - reach * 0.98 }, reach), 'dive just inside reach is a SAVE');
+  ok(!T.isSaved(shot, { kx: 0.05, ky: shot.gy - reach * 1.02 }, reach), 'dive just outside reach is a GOAL');
+
+  // Dead-centre shot is covered by a keeper sitting centrally (centre is risky).
+  ok(T.isSaved({ gx: 0.5, gy: 0.2 }, { kx: 0.5, ky: 0.18 }, reach), 'central shot vs central keeper is a SAVE');
+
+  // On-target bounds.
+  ok(T.shotOnTarget(0.05, 0.95), 'in-bounds shot is on target');
+  ok(!T.shotOnTarget(1.2, 0.5, 0.05), 'shot wide of the post is off target');
+  ok(!T.shotOnTarget(0.5, 1.2, 0.05), 'shot over the bar is off target');
+}
+
+// ---------------------------------------------------------------------------
 console.log('\n--------------------------------------------------');
 console.log('  ' + passed + ' passed, ' + failed + ' failed');
 console.log('--------------------------------------------------');

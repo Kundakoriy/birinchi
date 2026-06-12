@@ -56,6 +56,30 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Geometric shot resolution (PURE) — used by the on-screen player shootout so
+  // the verdict always matches the visual. The goal mouth is normalized to
+  // gx,gy in [0,1] (left->right, bottom->top). A shot is SAVED when the keeper's
+  // dive point lies within `reach` (a radius in that same normalized space) of
+  // the shot point. No probability roll decides the outcome — geometry does.
+  // ---------------------------------------------------------------------------
+
+  function distance(ax, ay, bx, by) {
+    var dx = ax - bx, dy = ay - by;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  /** SAVE when the keeper's dive point is within reach of the shot point. */
+  function isSaved(shot, dive, reach) {
+    return distance(shot.gx, shot.gy, dive.kx, dive.ky) <= reach;
+  }
+
+  /** True when the shot lands inside the goal bounds (with a small margin). */
+  function shotOnTarget(gx, gy, margin) {
+    margin = margin || 0;
+    return gx >= -margin && gx <= 1 + margin && gy >= -margin && gy <= 1 + margin;
+  }
+
+  // ---------------------------------------------------------------------------
   // Shootout engine
   // ---------------------------------------------------------------------------
   //
@@ -390,6 +414,9 @@
     makeRng: makeRng,
     clamp: clamp,
     goalProbability: goalProbability,
+    distance: distance,
+    isSaved: isSaved,
+    shotOnTarget: shotOnTarget,
     newShootout: newShootout,
     recordKick: recordKick,
     isComplete: isComplete,

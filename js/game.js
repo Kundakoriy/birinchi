@@ -20,6 +20,13 @@
   // normalized x-centre of each third in goal space (-1..1)
   var THIRD_X = { L: -0.6, C: 0, R: 0.6 };
 
+  // Map a continuous dive x (0..1, left->right) to the nearest available sprite
+  // pose. Height does not change the sprite (only 3 dive sprites + centre); the
+  // continuous (kx,ky) is honoured by translating the sprite to the real point.
+  function poseForKx(kx) {
+    return kx < 0.4 ? 'L' : kx > 0.6 ? 'R' : 'C';
+  }
+
   function ShootoutMatch(opts) {
     this.canvas = opts.canvas;
     this.ctx = this.canvas.getContext('2d');
@@ -108,6 +115,12 @@
     };
   };
 
+  // Same mapping but from normalized goal space gx,gy in [0,1] (left->right,
+  // bottom->top) — the space the geometric resolution works in.
+  ShootoutMatch.prototype._goalPointN = function (gx, gy) {
+    return this._goalPoint(gx * 2 - 1, gy);
+  };
+
   // --- input -----------------------------------------------------------------
   ShootoutMatch.prototype._bindInput = function () {
     var self = this;
@@ -139,9 +152,12 @@
       this._dragging = true;
       this._drag = p;
     } else if (this.phase === 'dive') {
+      // Continuous dive: tap anywhere in the goal mouth to choose (kx,ky).
       var q = this._evtPoint(e);
-      var third = q.x < this.W / 3 ? 'L' : q.x > this.W * 2 / 3 ? 'R' : 'C';
-      this._commitDefense(third);
+      var g = this.goal;
+      var kx = T.clamp((q.x - g.left) / g.width, 0, 1);
+      var ky = T.clamp((g.line - q.y) / g.height, 0, 1);
+      this._commitDefense({ kx: kx, ky: ky });
     }
   };
   ShootoutMatch.prototype._pointerMove = function (e) {
@@ -206,18 +222,18 @@
     if (Math.abs(shot.x) > 0.88 && this.rng() < t.POST_CHANCE) {
       return { result: 'post', target: { x: shot.x * 0.97, y: shot.y } };
     }
-    // Keeper third-guess save model.
-    var shotThird = Keeper.thirdOf(shot.x);
-    var corner = Keeper.cornerness(shot);
-    var keeperThird = Keeper.aiPickThird(this.keeperB, this.roundIndex, shotThird, this.rng);
-    var correct = keeperThird === shotThird;
-    var saveP = Keeper.saveProbability(this.keeperB, this.roundIndex, correct, corner, 'attack');
-    var saved = this.rng() < saveP;
+    // Geometric resolution: the keeper predicts a continuous dive point and the
+    // shot is SAVED iff that point is within reach of the shot. Pure geometry —
+    // the ball ends at (gx,gy) and the keeper ends at (kx,ky), so the visual
+    // always matches the verdict.
+    var gx = (shot.x + 1) / 2, gy = shot.y;
+    var dive = Keeper.predictDive({ gx: gx, gy: gy }, this.keeperB, this.roundIndex, this.rng);
+    var reach = Keeper.keeperReach(this.keeperB, this.roundIndex);
+    var saved = T.isSaved({ gx: gx, gy: gy }, dive, reach);
     return {
       result: saved ? 'save' : 'goal',
       target: { x: shot.x, y: shot.y },
-      keeperThird: keeperThird,
-      shotThird: shotThird
+      dive: dive // {kx, ky} in normalized goal space
     };
   };
 
@@ -229,11 +245,11 @@
     var to = this._goalPoint(info.target.x, info.target.y);
     var dur = 430 / this.timeScale;
 
-    // keeper dives to its chosen third; if it saves, it meets the ball.
-    var kThird = info.keeperThird || Keeper.thirdOf(info.target.x);
-    var diveTo = this._goalPoint(THIRD_X[kThird], info.result === 'save' ? info.target.y : 0.4 + this.rng() * 0.3);
-    if (info.result === 'save') diveTo = to; // glove meets ball
-    this._keeper = { pose: kThird, t: 0, kit: 'opp', toX: diveTo.x, toY: diveTo.y };
+    // The keeper ends exactly at its dive point (kx,ky). On a save that point is
+    // within reach of the shot, so keeper and ball visually meet.
+    var dive = info.dive || { kx: 0.5, ky: root.Config.TUNING.KEEPER_REST_Y };
+    var diveTo = this._goalPointN(dive.kx, dive.ky);
+    this._keeper = { pose: poseForKx(dive.kx), t: 0, kit: 'opp', toX: diveTo.x, toY: diveTo.y };
     this._animKeeper(dur);
 
     this._animateBall(to, dur, function () {
@@ -251,33 +267,38 @@
     if (!aimCorner) third = this.rng() < 0.5 ? 'C' : third;
     var sx = THIRD_X[third] + (this.rng() * 0.2 - 0.1);
     var sy = aimCorner ? (0.45 + this.rng() * 0.4) : (0.15 + this.rng() * 0.4);
-    this._oppShot = { x: T.clamp(sx, -0.95, 0.95), y: T.clamp(sy, 0, 0.98), third: third };
+    this._oppShot = { x: T.clamp(sx, -0.95, 0.95), y: T.clamp(sy, 0, 0.98) };
 
     this.phase = 'dive';
     this._keeper = { pose: 'ready', t: 0, kit: 'mine' };
     this._diveDeadline = (root.performance ? performance.now() : Date.now()) + root.Config.TUNING.DIVE_TIMER_MS;
     if (this._diveTimer) clearTimeout(this._diveTimer);
     this._diveTimer = setTimeout(function () {
-      if (self.phase === 'dive') self._commitDefense(['L', 'C', 'R'][Math.floor(self.rng() * 3)]);
+      // No dive picked in time -> a hesitant, centralish guess.
+      if (self.phase === 'dive') {
+        self._commitDefense({ kx: 0.3 + self.rng() * 0.4, ky: self.rng() * 0.5 });
+      }
     }, root.Config.TUNING.DIVE_TIMER_MS);
   };
 
-  ShootoutMatch.prototype._commitDefense = function (playerThird) {
+  // dive = {kx, ky} continuous point the player chose to dive to. Same geometric
+  // check as attack: SAVE iff the dive point is within the keeper's reach of the
+  // opponent's shot.
+  ShootoutMatch.prototype._commitDefense = function (dive) {
     if (this.phase !== 'dive') return;
     if (this._diveTimer) { clearTimeout(this._diveTimer); this._diveTimer = null; }
     var self = this;
     var opp = this._oppShot;
-    var correct = playerThird === opp.third;
-    var corner = Keeper.cornerness(opp);
-    var saveP = Keeper.saveProbability(this.keeperA, this.roundIndex, correct, corner, 'defense');
-    var saved = this.rng() < saveP;
-    var info = { result: saved ? 'save' : 'goal', target: { x: opp.x, y: opp.y }, playerThird: playerThird };
+    var ogx = (opp.x + 1) / 2, ogy = opp.y;
+    var reach = Keeper.keeperReach(this.keeperA, this.roundIndex);
+    var saved = T.isSaved({ gx: ogx, gy: ogy }, dive, reach);
+    var info = { result: saved ? 'save' : 'goal', target: { x: opp.x, y: opp.y }, dive: dive };
 
     this.phase = 'oppflying';
     Sound && Sound.play('kick');
     var to = this._goalPoint(opp.x, opp.y);
-    var diveTo = saved ? to : this._goalPoint(THIRD_X[playerThird], 0.4);
-    this._keeper = { pose: playerThird, t: 0, kit: 'mine', toX: diveTo.x, toY: diveTo.y };
+    var diveTo = this._goalPointN(dive.kx, dive.ky);
+    this._keeper = { pose: poseForKx(dive.kx), t: 0, kit: 'mine', toX: diveTo.x, toY: diveTo.y };
     var dur = 560; // compressed
     this._animKeeper(dur);
     this._animateBall(to, dur, function () {
@@ -585,13 +606,14 @@
   }
 
   // --- keeper ----------------------------------------------------------------
-  // Map the existing animation state to a sprite (no new state machine):
+  // Map the continuous dive point to the nearest sprite (no new state machine):
   //   ready -> keeper-ready, L -> keeper-dive-left, R -> keeper-dive-right,
   //   C -> keeper-center. Sized by real-world proportion: one shared scale is
   //   derived so the STANDING keeper is KEEPER_HEIGHT_RATIO of the goal mouth
   //   height; every sprite keeps its own aspect (dives render wide/short).
-  //   Feet are anchored on the goal line so nothing floats or sinks. Falls back
-  //   to the path-drawn keeper if a needed sprite failed to load.
+  //   The sprite is translated toward the REAL (kx,ky) dive point so it visually
+  //   lands where it mathematically defends. Falls back to the path-drawn keeper
+  //   if a needed sprite failed to load.
   var KEEPER_SPRITE = { ready: 'keeperReady', L: 'keeperDiveLeft', R: 'keeperDiveRight', C: 'keeperCenter' };
 
   ShootoutMatch.prototype._drawKeeper = function (c, g) {
@@ -602,30 +624,29 @@
     var ref = Sprites && Sprites.get('keeperReady'); // standing reference for scale
     if (!img || !ref) return this._drawKeeperPath(c, g);
 
-    var baseX = (g.left + g.right) / 2;
-    var prog = (pose === 'ready') ? 0 : (k.t || 0);
-    // horizontal position: lerp from centre toward the dive target as t grows
-    var kx = baseX;
-    if (pose !== 'ready') {
-      if (k.toX != null) kx = baseX + (k.toX - baseX) * prog;
-      else kx = baseX + THIRD_X[pose] * (g.width * 0.42) * prog;
-    }
-
     var ratio = root.Config.TUNING.KEEPER_HEIGHT_RATIO || 0.76;
     var scale = (ratio * g.height) / ref.height; // shared metres-per-source-pixel
     var w = img.width * scale, h = img.height * scale;
 
-    // anchor: feet on/near the goal line; centre pose lifts a little as it jumps
-    var jump = (pose === 'C') ? prog * g.height * 0.12 : 0;
-    var feetY = g.line + g.height * 0.02 - jump;
+    // Centre the sprite on the dive point. Idle = standing on the line; as the
+    // dive plays out (prog 0->1) the sprite slides to the continuous (kx,ky)
+    // canvas point, so it covers exactly where it defends — including the top
+    // corners and centre.
+    var baseX = (g.left + g.right) / 2;
+    var idleCx = baseX, idleCy = g.line - h * 0.5;
+    var prog = (pose === 'ready') ? 0 : (k.t || 0);
+    var targetX = (k.toX != null) ? k.toX : idleCx;
+    var targetY = (k.toY != null) ? k.toY : idleCy;
+    var cx = idleCx + (targetX - idleCx) * prog;
+    var cy = idleCy + (targetY - idleCy) * prog;
 
     c.save();
-    // grounding shadow under the keeper
+    // grounding shadow stays on the line under the keeper's horizontal position
     c.fillStyle = 'rgba(0,0,0,0.22)';
     c.beginPath();
-    c.ellipse(kx, g.line + g.height * 0.02, Math.max(w * 0.3, g.width * 0.06), g.height * 0.03, 0, 0, 7);
+    c.ellipse(cx, g.line + g.height * 0.02, Math.max(w * 0.3, g.width * 0.06), g.height * 0.03, 0, 0, 7);
     c.fill();
-    c.drawImage(img, kx - w / 2, feetY - h, w, h);
+    c.drawImage(img, cx - w / 2, cy - h / 2, w, h);
     c.restore();
   };
 
@@ -716,16 +737,12 @@
     var left = Math.max(0, this._diveDeadline - now);
     var frac = left / root.Config.TUNING.DIVE_TIMER_MS;
 
-    // three tappable zones
-    var third = this.goal.width / 3, labels = ['DIVE LEFT', 'STAY', 'DIVE RIGHT'];
     c.save();
-    c.font = '800 ' + Math.round(W * 0.032) + 'px Archivo, sans-serif';
     c.textAlign = 'center';
-    for (var i = 0; i < 3; i++) {
-      var cx = this.goal.left + third * (i + 0.5);
-      c.fillStyle = 'rgba(247,201,72,0.85)';
-      c.fillText(labels[i], cx, this.goal.line + 28);
-    }
+    // hint: tap anywhere in the goal (incl. the corners) to dive there
+    c.font = '700 ' + Math.round(W * 0.032) + 'px Archivo, sans-serif';
+    c.fillStyle = 'rgba(247,201,72,0.85)';
+    c.fillText('tap the goal to dive — corners too', W / 2, this.goal.line + 28);
     // prompt + timer bar
     c.fillStyle = '#fff';
     c.font = '900 ' + Math.round(W * 0.06) + 'px "Archivo Black", Archivo, sans-serif';

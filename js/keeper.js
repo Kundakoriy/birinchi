@@ -50,61 +50,46 @@
     return band;
   }
 
-  // Which third of the goal a normalized x (-1..1) falls in.
-  function thirdOf(x) {
-    if (x < -0.22) return 'L';
-    if (x > 0.22) return 'R';
-    return 'C';
-  }
-
-  // How "cornery" a shot is (0 = central/low, 1 = tucked into a top corner).
-  function cornerness(shot) {
-    var horiz = T.clamp((Math.abs(shot.x) - 0.2) / 0.7, 0, 1);
-    var vert = T.clamp(shot.y / 1.0, 0, 1);
-    return T.clamp(horiz * 0.7 + vert * 0.5, 0, 1);
-  }
-
-  // The keeper (AI) picks a third to dive into, guessing the true third with a
-  // skill/round-dependent probability.
-  function aiPickThird(rating, roundIndex, shotThird, rng) {
+  /**
+   * The keeper's SAVE RADIUS in normalized goal space (0..1). Bigger reach for
+   * better keepers and deeper rounds. Used by the geometric resolution.
+   */
+  function keeperReach(rating, roundIndex) {
     var t = tuning();
-    var p = T.clamp(t.KEEPER_GUESS_BASE + t.KEEPER_GUESS_SKILL * skillOf(rating) +
-                    t.KEEPER_GUESS_PER_ROUND * (roundIndex || 0), 0, 0.95);
-    if (rng() < p) return shotThird; // guessed right
-    // guessed wrong: pick one of the other two thirds
-    var others = ['L', 'C', 'R'].filter(function (x) { return x !== shotThird; });
-    return others[Math.floor(rng() * others.length)];
+    return t.KEEPER_REACH + t.KEEPER_REACH_SKILL * skillOf(rating) +
+           t.KEEPER_REACH_PER_ROUND * (roundIndex || 0);
   }
 
   /**
-   * Probability a shot is SAVED, given the defending keeper's rating, the round,
-   * whether the keeper committed to the correct third, and the shot's cornerness.
-   * Used for BOTH the AI keeper (you attacking) and your keeper (you defending),
-   * with separate tuning bands.
+   * AI keeper guesses where the shot will go and returns a continuous dive point
+   * {kx, ky} in normalized goal space (covers ALL regions incl. the four
+   * corners). Prediction accuracy scales the guess error: a sharp keeper lands
+   * near the true shot, a poor one scatters. The keeper also under-commits to
+   * height (KEEPER_HIGH_HANDICAP), which keeps the top corners genuinely safer.
+   *
+   * @param shot {gx, gy} true shot point (normalized)
    */
-  function saveProbability(rating, roundIndex, correctThird, corner, mode) {
+  function predictDive(shot, rating, roundIndex, rng) {
     var t = tuning();
-    if (mode === 'defense') {
-      if (!correctThird) return t.DEF_WRONG_SAVE;
-      var d = t.DEF_SAVE_BASE + t.DEF_SAVE_SKILL * skillOf(rating) +
-              t.DEF_SAVE_PER_ROUND * (roundIndex || 0);
-      return T.clamp(d * (1 - corner * t.CORNER_SAVE_REDUCTION), 0, 0.95);
-    }
-    // attack: AI keeper saving your shot
-    if (!correctThird) return t.WRONG_GUESS_SAVE;
-    var s = t.KEEPER_SAVE_BASE + t.KEEPER_SAVE_SKILL * skillOf(rating) +
-            t.KEEPER_SAVE_PER_ROUND * (roundIndex || 0);
-    return T.clamp(s * (1 - corner * t.CORNER_SAVE_REDUCTION), 0, 0.95);
+    rng = rng || Math.random;
+    var acc = T.clamp(t.KEEPER_PREDICTION + t.KEEPER_PREDICTION_SKILL * skillOf(rating) +
+                      t.KEEPER_PREDICTION_ROUND * (roundIndex || 0), 0, 0.97);
+    // Interpolate from a central default toward the true shot by accuracy, then
+    // add jitter. A low-accuracy keeper barely leaves centre (corners safe,
+    // centre risky); a high-accuracy keeper lands on the shot.
+    var kx = 0.5 + (shot.gx - 0.5) * acc + (rng() * 2 - 1) * t.KEEPER_DIVE_NOISE_X;
+    var ky = t.KEEPER_REST_Y +
+             (shot.gy - t.KEEPER_REST_Y) * acc * (1 - t.KEEPER_HIGH_HANDICAP) +
+             (rng() * 2 - 1) * t.KEEPER_DIVE_NOISE_Y;
+    return { kx: T.clamp(kx, -0.12, 1.12), ky: T.clamp(ky, -0.12, 1.12) };
   }
 
   root.Keeper = {
     BANDS: BANDS,
     keeperRating: keeperRating,
     badge: badge,
-    thirdOf: thirdOf,
-    cornerness: cornerness,
-    aiPickThird: aiPickThird,
-    saveProbability: saveProbability,
+    keeperReach: keeperReach,
+    predictDive: predictDive,
     skillOf: skillOf
   };
 })(typeof self !== 'undefined' ? self : this);
