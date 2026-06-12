@@ -27,6 +27,7 @@
   App.init = function () {
     stage = document.getElementById('stage');
     Ads.init();
+    root.Sprites.loadAll(); // begin preloading art immediately
     App.showMenu();
   };
 
@@ -421,52 +422,59 @@
         '</div>' +
         '<div class="kick-dots" id="kickDots"></div>' +
         '<canvas id="pitch" class="pitch"></canvas>' +
+        '<div class="match-loading" id="matchLoading">Loading…</div>' +
       '</div>', 'screen-match');
 
-    Ads.gameplayStart();
     var canvas = $('#pitch');
     var allowRetake = Config.ADS_ENABLED; // rewarded retake available
 
-    var m = new root.ShootoutMatch({
-      canvas: canvas,
-      teamA: S.playerTeam,
-      teamB: cfg.opponent,
-      mode: cfg.mode,
-      roundIndex: cfg.roundIndex || 0,
-      keeperA: cfg.keeperP,
-      keeperB: cfg.keeperO,
-      allowRetake: allowRetake,
-      isFinalKickPotential: !!cfg.isFinal,
-      rng: S.rng,
-      onUpdate: function (state) {
-        $('#scoreA').textContent = state.a;
-        $('#scoreB').textContent = state.b;
-        renderDots(state);
-      },
-      onKickResult: function (info) {
-        // track player keeper form (opponent kicking at us); the outcome label
-        // is drawn on the canvas by the match itself.
-        if (info.side === 'B') {
-          S.form.kicksFaced++;
-          if (info.result === 'save') S.form.savesMade++;
+    // Don't begin the match until all sprites have settled (loaded or failed).
+    root.Sprites.onReady(function () {
+      var loading = $('#matchLoading');
+      if (loading) loading.parentNode.removeChild(loading);
+      Ads.gameplayStart();
+
+      var m = new root.ShootoutMatch({
+        canvas: canvas,
+        teamA: S.playerTeam,
+        teamB: cfg.opponent,
+        mode: cfg.mode,
+        roundIndex: cfg.roundIndex || 0,
+        keeperA: cfg.keeperP,
+        keeperB: cfg.keeperO,
+        allowRetake: allowRetake,
+        isFinalKickPotential: !!cfg.isFinal,
+        rng: S.rng,
+        onUpdate: function (state) {
+          $('#scoreA').textContent = state.a;
+          $('#scoreB').textContent = state.b;
+          renderDots(state);
+        },
+        onKickResult: function (info) {
+          // track player keeper form (opponent kicking at us); the outcome label
+          // is drawn on the canvas by the match itself.
+          if (info.side === 'B') {
+            S.form.kicksFaced++;
+            if (info.result === 'save') S.form.savesMade++;
+          }
+        },
+        onRetakeOffer: function (retakeCb) {
+          showRetakeOffer(retakeCb);
+        },
+        onWinningKick: function () {
+          document.body.classList.add('slowmo');
+          setTimeout(function () { document.body.classList.remove('slowmo'); }, 1500);
+        },
+        onEnd: function (state) {
+          Ads.gameplayStop();
+          m.destroy();
+          var playerWon = state.winner === 'A';
+          if (state.winner === 'draw') {} else if (playerWon) S.form.wins++;
+          App.showMatchResult(state, cfg);
         }
-      },
-      onRetakeOffer: function (retakeCb) {
-        showRetakeOffer(retakeCb);
-      },
-      onWinningKick: function () {
-        document.body.classList.add('slowmo');
-        setTimeout(function () { document.body.classList.remove('slowmo'); }, 1500);
-      },
-      onEnd: function (state) {
-        Ads.gameplayStop();
-        m.destroy();
-        var playerWon = state.winner === 'A';
-        if (state.winner === 'draw') {} else if (playerWon) S.form.wins++;
-        App.showMatchResult(state, cfg);
-      }
+      });
+      m.start();
     });
-    m.start();
   };
 
   function renderDots(state) {

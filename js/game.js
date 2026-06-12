@@ -91,7 +91,10 @@
     };
     this.goal.width = this.goal.right - this.goal.left;
     this.goal.height = this.goal.line - this.goal.top;
-    this.ballR = Math.max(11, this.W * 0.038);
+    // Ball size from real-world proportion vs the goal mouth height (so the
+    // sprite and the interactive ball share one believable scale).
+    var ballRatio = (root.Config.TUNING && root.Config.TUNING.BALL_DIAMETER_RATIO) || 0.09;
+    this.ballR = Math.max(10, ballRatio * this.goal.height / 2);
     this.ballHome = { x: this.W * 0.5, y: this.H * 0.86 };
     this.ball = { x: this.ballHome.x, y: this.ballHome.y, rot: 0 };
     this.maxDrag = this.H * 0.30;
@@ -522,7 +525,24 @@
   };
 
   // --- ball ------------------------------------------------------------------
+  // Sprite ball: draw ball.png with the existing spin + ground shadow. Falls
+  // back to the path-drawn ball if the sprite failed to load.
   ShootoutMatch.prototype._drawBall = function (c, x, y, r, rot) {
+    var img = root.Sprites && root.Sprites.get('ball');
+    if (!img) return this._drawBallPath(c, x, y, r, rot);
+    c.save();
+    // ground shadow
+    c.fillStyle = 'rgba(0,0,0,0.28)';
+    c.beginPath(); c.ellipse(x, y + r * 0.92, r * 0.95, r * 0.32, 0, 0, 7); c.fill();
+    // spin around the ball centre; the sprite is square so rotation is clean
+    c.translate(x, y);
+    c.rotate(rot || 0);
+    c.drawImage(img, -r, -r, r * 2, r * 2);
+    c.restore();
+  };
+
+  // Fallback: original path-drawn ball (kept intact).
+  ShootoutMatch.prototype._drawBallPath = function (c, x, y, r, rot) {
     c.save();
     // ground shadow
     c.fillStyle = 'rgba(0,0,0,0.28)';
@@ -565,7 +585,52 @@
   }
 
   // --- keeper ----------------------------------------------------------------
+  // Map the existing animation state to a sprite (no new state machine):
+  //   ready -> keeper-ready, L -> keeper-dive-left, R -> keeper-dive-right,
+  //   C -> keeper-center. Sized by real-world proportion: one shared scale is
+  //   derived so the STANDING keeper is KEEPER_HEIGHT_RATIO of the goal mouth
+  //   height; every sprite keeps its own aspect (dives render wide/short).
+  //   Feet are anchored on the goal line so nothing floats or sinks. Falls back
+  //   to the path-drawn keeper if a needed sprite failed to load.
+  var KEEPER_SPRITE = { ready: 'keeperReady', L: 'keeperDiveLeft', R: 'keeperDiveRight', C: 'keeperCenter' };
+
   ShootoutMatch.prototype._drawKeeper = function (c, g) {
+    var Sprites = root.Sprites;
+    var k = this._keeper;
+    var pose = (k.pose === 'L' || k.pose === 'R' || k.pose === 'C') ? k.pose : 'ready';
+    var img = Sprites && Sprites.get(KEEPER_SPRITE[pose]);
+    var ref = Sprites && Sprites.get('keeperReady'); // standing reference for scale
+    if (!img || !ref) return this._drawKeeperPath(c, g);
+
+    var baseX = (g.left + g.right) / 2;
+    var prog = (pose === 'ready') ? 0 : (k.t || 0);
+    // horizontal position: lerp from centre toward the dive target as t grows
+    var kx = baseX;
+    if (pose !== 'ready') {
+      if (k.toX != null) kx = baseX + (k.toX - baseX) * prog;
+      else kx = baseX + THIRD_X[pose] * (g.width * 0.42) * prog;
+    }
+
+    var ratio = root.Config.TUNING.KEEPER_HEIGHT_RATIO || 0.76;
+    var scale = (ratio * g.height) / ref.height; // shared metres-per-source-pixel
+    var w = img.width * scale, h = img.height * scale;
+
+    // anchor: feet on/near the goal line; centre pose lifts a little as it jumps
+    var jump = (pose === 'C') ? prog * g.height * 0.12 : 0;
+    var feetY = g.line + g.height * 0.02 - jump;
+
+    c.save();
+    // grounding shadow under the keeper
+    c.fillStyle = 'rgba(0,0,0,0.22)';
+    c.beginPath();
+    c.ellipse(kx, g.line + g.height * 0.02, Math.max(w * 0.3, g.width * 0.06), g.height * 0.03, 0, 0, 7);
+    c.fill();
+    c.drawImage(img, kx - w / 2, feetY - h, w, h);
+    c.restore();
+  };
+
+  // Fallback: original path-drawn keeper (kept intact).
+  ShootoutMatch.prototype._drawKeeperPath = function (c, g) {
     var k = this._keeper;
     var baseX = (g.left + g.right) / 2;
     var baseY = g.line; // stands on the line

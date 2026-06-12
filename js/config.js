@@ -55,7 +55,16 @@
       DEF_SAVE_SKILL: 0.30,          // + this * skill (of YOUR keeper)
       DEF_SAVE_PER_ROUND: 0.02,      // + this * round
       DEF_WRONG_SAVE: 0.06,          // chance to save when you dive the wrong way
-      DIVE_TIMER_MS: 2200            // how long you have to pick a dive
+      DIVE_TIMER_MS: 2200,           // how long you have to pick a dive
+
+      // --- SPRITE SIZING (real-world proportions vs the rendered goal mouth) -
+      // Sprites are scaled by real-world size relative to the goal (7.32m x
+      // 2.44m), NOT by their pixel dimensions, so they read at a believable
+      // scale. Each sprite keeps its own aspect ratio (dives render wide/short,
+      // ready/centre render tall) via a single shared metres-per-pixel scale
+      // derived from the standing (ready) keeper.
+      KEEPER_HEIGHT_RATIO: 0.76,     // standing keeper ~1.85m vs 2.44m goal height
+      BALL_DIAMETER_RATIO: 0.09      // ball ~0.22m vs 2.44m goal height
     }
   };
 })(typeof self !== 'undefined' ? self : this);

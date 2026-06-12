@@ -6,7 +6,12 @@ Vanilla JS, single page, no build step. **Every match is a penalty shootout.**
 
 > Session 2: two-sided play (shoot on attack, dive on defence), clearer shot
 > feedback, tunable difficulty, upgraded keeper/ball art, and the rename to
-> Penalty Nations 2026. Audio pass and final GD submission prep continue next.
+> Penalty Nations 2026.
+>
+> Session 3: real PNG art integrated — the keeper and ball are drawn from image
+> sprites (with the path-drawn art kept as an automatic fallback) and the menu
+> uses a stadium background. Sprites are sized by real-world proportions vs the
+> goal mouth. Gameplay, swipe, dive timing and tournament flow are unchanged.
 
 ## Run it
 
@@ -101,14 +106,16 @@ match. `Config.GD_GAME_ID` is set to the production GameDistribution id.
 
 ```
 index.html            single page; loads modules in order
+assets/               PNG art: ball, keeper poses, menu background
 css/styles.css         dark pitch-night theme, gold accents, Archivo fonts
 js/config.js           build target, GD_GAME_ID, feature flags, TUNING
 js/tournament.js       PURE engine: shootout rules, standings, bracket, sim
 js/teams.js            48 teams (ratings, pots, ISO flag codes)
 js/draw.js             official + pot-seeded random draw
 js/keeper.js           keeper rating + third-based save model + AI dive
+js/sprites.js          image preloader (ready-gate + per-sprite fallback)
 js/ads.js              ad adapter (gd / crazy / none)
-js/game.js             two-sided shootout (swipe attack + dive defence, canvas)
+js/game.js             two-sided shootout (sprite art + swipe/dive, canvas)
 js/ui.js               DOM render helpers (tables, bracket, badges)
 js/main.js             app/state machine + tournament orchestration
 js/audio.js            placeholder WebAudio sounds
@@ -124,3 +131,7 @@ Edit `js/config.js`:
 - `ADS_ENABLED`, `ADS_DEBUG_FAKE`, `DEBUG`
 - `TUNING`: gameplay balance constants (conversion, keeper save chances, miss
   thresholds, dive timer) — each commented
+- `TUNING.KEEPER_HEIGHT_RATIO` / `TUNING.BALL_DIAMETER_RATIO`: sprite sizes as a
+  fraction of the rendered goal-mouth height (standing keeper ~1.85m, ball
+  ~0.22m vs the 2.44m goal). All keeper sprites share one real-world scale
+  derived from the standing keeper, so each keeps its own aspect ratio.

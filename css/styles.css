@@ -55,6 +55,16 @@ h1, h2, h3 { font-family: 'Archivo Black', 'Archivo', sans-serif; margin: 0; }
 .flag.big { width: 3.4em; height: 2.6em; border-radius: 6px; }
 
 /* ---------- MENU ---------- */
+/* Portrait stadium background (cover-fit) with a dark overlay so the logo and
+   buttons stay legible on top. */
+.screen-menu {
+  background-image:
+    linear-gradient(rgba(3, 12, 8, 0.45), rgba(3, 12, 8, 0.82)),
+    url('../assets/menu-bg.png');
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
 .screen-menu .menu { padding: 34px 22px 26px; min-height: 100%; display: flex; flex-direction: column; }
 .menu-badge { align-self: center; font-size: 12px; letter-spacing: .25em; color: var(--gold); border: 1px solid rgba(247,201,72,0.4); padding: 6px 12px; border-radius: 999px; }
 .title { text-align: center; font-size: 54px; line-height: 0.92; margin-top: 22px; letter-spacing: -1px; }
@@ -152,6 +162,8 @@ h1, h2, h3 { font-family: 'Archivo Black', 'Archivo', sans-serif; margin: 0; }
 .dot.sc { background: var(--green); }
 .dot.ms { background: var(--red); }
 .pitch { flex: 1; width: 100%; display: block; touch-action: none; }
+.match-loading { position: absolute; left: 50%; top: 55%;
+  transform: translate(-50%, -50%); color: var(--muted); font-weight: 700; letter-spacing: .1em; }
 
 /* ---------- RESULT ---------- */
 .screen-result .result { padding: 50px 24px; text-align: center; min-height: 100%; display: flex; flex-direction: column; justify-content: center; }
