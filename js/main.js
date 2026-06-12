@@ -46,7 +46,8 @@
     var teamOptions = Teams.TEAMS.slice().sort(function (a, b) {
       return a.name.localeCompare(b.name);
     }).map(function (t) {
-      return '<option value="' + t.id + '">' + t.name + ' (' + t.rating + ')</option>';
+      // Stars are the primary strength signal (raw number dropped here).
+      return '<option value="' + t.id + '">' + t.name + '  ' + UI.unicodeStars(t.rating) + '</option>';
     }).join('');
 
     setScreen(
@@ -300,7 +301,10 @@
       return returnToHub();
     }
     var playerIsHome = pm.home.id === pid;
-    var opponent = playerIsHome ? pm.away : pm.home;
+    var opponentRow = playerIsHome ? pm.away : pm.home;
+    // Bracket rows are standings rows (id/name/rating) — resolve to the full team
+    // object so the opponent carries its flag `code` like group-stage opponents.
+    var opponent = lookup(opponentRow.id) || opponentRow;
     var isFinal = round.length === 1;
 
     App.showMatchPreview({
@@ -372,6 +376,16 @@
     simulateFromCurrentRound();
   }
 
+  // Stars + one-word tier are the primary strength signal; the raw number is
+  // kept only as a subtle secondary line.
+  function previewStrength(team) {
+    return '<div class="vs-strength">' +
+      UI.starMeter(team.rating) +
+      '<div class="vs-tier">' + UI.tierLabel(team.rating) + '</div>' +
+      '<div class="vs-str-num">STR ' + team.rating + '</div>' +
+      '</div>';
+  }
+
   // ==========================================================================
   // MATCH PREVIEW
   // ==========================================================================
@@ -389,9 +403,11 @@
         '<div class="prev-rule">' + rule + '</div>' +
         '<div class="versus">' +
           '<div class="vs-team">' + UI.flag(pTeam, 'big') + '<div class="vs-name">' + pTeam.name + '</div>' +
+            previewStrength(pTeam) +
             UI.keeperBadge(keeperP) + '</div>' +
           '<div class="vs-mid">VS</div>' +
           '<div class="vs-team">' + UI.flag(cfg.opponent, 'big') + '<div class="vs-name">' + cfg.opponent.name + '</div>' +
+            previewStrength(cfg.opponent) +
             UI.keeperBadge(keeperO) + '</div>' +
         '</div>' +
         '<button id="koBtn" class="btn btn-gold btn-lg">Kick off</button>' +

@@ -56,6 +56,39 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Team strength -> star rating (PURE). A readable signal for players. The
+  // thresholds default to the spec below but can be overridden (the UI passes
+  // Config.TUNING.STAR_THRESHOLDS so they stay tunable in one place).
+  // ---------------------------------------------------------------------------
+
+  var DEFAULT_STAR_TABLE = [
+    { min: 88, stars: 5 },
+    { min: 82, stars: 4.5 },
+    { min: 78, stars: 4 },
+    { min: 74, stars: 3.5 },
+    { min: 70, stars: 3 },
+    { min: 66, stars: 2.5 },
+    { min: 0,  stars: 2 }
+  ];
+
+  /** Map a 0-100 strength to a star value (5, 4.5, 4, 3.5, 3, 2.5, 2). */
+  function starRating(rating, table) {
+    var tbl = table || DEFAULT_STAR_TABLE;
+    for (var i = 0; i < tbl.length; i++) {
+      if (rating >= tbl[i].min) return tbl[i].stars;
+    }
+    return tbl[tbl.length - 1].stars;
+  }
+
+  /** One-word tier label from a star value. */
+  function tierLabel(stars) {
+    if (stars >= 5) return 'Contender';
+    if (stars >= 4) return 'Strong';
+    if (stars >= 3) return 'Solid';
+    return 'Underdog';
+  }
+
+  // ---------------------------------------------------------------------------
   // Geometric shot resolution (PURE) — used by the on-screen player shootout so
   // the verdict always matches the visual. The goal mouth is normalized to
   // gx,gy in [0,1] (left->right, bottom->top). A shot is SAVED when the keeper's
@@ -253,6 +286,7 @@
       id: team.id,
       name: team.name,
       rating: team.rating,
+      code: team.code, // carry the flag code so bracket rows can render flags
       P: 0, W: 0, D: 0, L: 0, GF: 0, GA: 0, GD: 0, Pts: 0
     };
   }
@@ -414,6 +448,9 @@
     makeRng: makeRng,
     clamp: clamp,
     goalProbability: goalProbability,
+    DEFAULT_STAR_TABLE: DEFAULT_STAR_TABLE,
+    starRating: starRating,
+    tierLabel: tierLabel,
     distance: distance,
     isSaved: isSaved,
     shotOnTarget: shotOnTarget,

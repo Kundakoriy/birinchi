@@ -342,6 +342,39 @@ group('Geometric resolution: save iff keeper dive within reach of the shot');
 }
 
 // ---------------------------------------------------------------------------
+group('Strength -> stars mapping (and tier labels)');
+{
+  eq(T.starRating(94), 5, '94 -> 5 stars');
+  eq(T.starRating(88), 5, '88 (band edge) -> 5 stars');
+  eq(T.starRating(87), 4.5, '87 -> 4.5 stars');
+  eq(T.starRating(82), 4.5, '82 (band edge) -> 4.5 stars');
+  eq(T.starRating(81), 4, '81 -> 4 stars');
+  eq(T.starRating(78), 4, '78 (band edge) -> 4 stars');
+  eq(T.starRating(77), 3.5, '77 -> 3.5 stars');
+  eq(T.starRating(74), 3.5, '74 (band edge) -> 3.5 stars');
+  eq(T.starRating(73), 3, '73 -> 3 stars');
+  eq(T.starRating(70), 3, '70 (band edge) -> 3 stars');
+  eq(T.starRating(69), 2.5, '69 -> 2.5 stars');
+  eq(T.starRating(66), 2.5, '66 (band edge) -> 2.5 stars');
+  eq(T.starRating(65), 2, '65 -> 2 stars');
+  eq(T.starRating(40), 2, 'very low -> 2 stars (floor)');
+
+  // Tier labels by star band.
+  eq(T.tierLabel(5), 'Contender', '5 stars -> Contender');
+  eq(T.tierLabel(4.5), 'Strong', '4.5 stars -> Strong');
+  eq(T.tierLabel(4), 'Strong', '4 stars -> Strong');
+  eq(T.tierLabel(3.5), 'Solid', '3.5 stars -> Solid');
+  eq(T.tierLabel(3), 'Solid', '3 stars -> Solid');
+  eq(T.tierLabel(2.5), 'Underdog', '2.5 stars -> Underdog');
+  eq(T.tierLabel(2), 'Underdog', '2 stars -> Underdog');
+
+  // Honours an overridden threshold table (as the UI passes from Config.TUNING).
+  var custom = [{ min: 90, stars: 5 }, { min: 0, stars: 1 }];
+  eq(T.starRating(85, custom), 1, 'custom table respected (85 -> 1)');
+  eq(T.starRating(95, custom), 5, 'custom table respected (95 -> 5)');
+}
+
+// ---------------------------------------------------------------------------
 console.log('\n--------------------------------------------------');
 console.log('  ' + passed + ' passed, ' + failed + ' failed');
 console.log('--------------------------------------------------');

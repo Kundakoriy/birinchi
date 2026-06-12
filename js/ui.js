@@ -6,11 +6,42 @@
   'use strict';
 
   var Keeper = root.Keeper;
+  var T = root.Tournament;
+  var Config = root.Config;
 
   function el(html) {
     var d = document.createElement('div');
     d.innerHTML = html.trim();
     return d.firstChild;
+  }
+
+  // --- team strength as stars --------------------------------------------------
+  function starsForRating(rating) {
+    return T.starRating(rating, Config.TUNING && Config.TUNING.STAR_THRESHOLDS);
+  }
+
+  // Rich 5-star meter (full / half / empty) for HTML contexts.
+  function starMeter(rating, extraCls) {
+    var s = starsForRating(rating);
+    var full = Math.floor(s), half = (s - full) >= 0.5;
+    var out = '';
+    for (var i = 0; i < 5; i++) {
+      var cls = i < full ? 'full' : (i === full && half ? 'half' : 'empty');
+      out += '<span class="rstar ' + cls + '">★</span>';
+    }
+    return '<span class="star-meter' + (extraCls ? ' ' + extraCls : '') + '">' + out + '</span>';
+  }
+
+  // Plain-text stars for native <option> elements (no HTML styling there).
+  function unicodeStars(rating) {
+    var s = starsForRating(rating);
+    var full = Math.floor(s), half = (s - full) >= 0.5;
+    return new Array(full + 1).join('★') + (half ? '½' : '') +
+           new Array(5 - full - (half ? 1 : 0) + 1).join('☆');
+  }
+
+  function tierLabel(rating) {
+    return T.tierLabel(starsForRating(rating));
   }
 
   function flag(team, extra) {
@@ -94,6 +125,9 @@
     flag: flag,
     teamRow: teamRow,
     stars: stars,
+    starMeter: starMeter,
+    unicodeStars: unicodeStars,
+    tierLabel: tierLabel,
     keeperBadge: keeperBadge,
     groupTable: groupTable,
     bracketView: bracketView

@@ -18,6 +18,12 @@ Vanilla JS, single page, no build step. **Every match is a penalty shootout.**
 > and it's a SAVE iff those are within the keeper's reach, so the visual always
 > matches the verdict. The keeper can dive to any region incl. the top corners.
 > The hub auto-selects the Bracket tab once the knockouts begin.
+>
+> Session 5: knockout opponents now render real flags (bracket rows carry the
+> flag code); the ball and keeper end-points are projected from the exact same
+> normalized coords the save check uses; and team strength is shown as a star
+> rating + one-word tier (Contender / Strong / Solid / Underdog) in the team
+> select and match preview, with the raw number demoted to a subtle line.
 
 ## Run it
 

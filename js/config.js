@@ -68,7 +68,21 @@
       // ready/centre render tall) via a single shared metres-per-pixel scale
       // derived from the standing (ready) keeper.
       KEEPER_HEIGHT_RATIO: 0.76,     // standing keeper ~1.85m vs 2.44m goal height
-      BALL_DIAMETER_RATIO: 0.09      // ball ~0.22m vs 2.44m goal height
+      BALL_DIAMETER_RATIO: 0.09,     // ball ~0.22m vs 2.44m goal height
+
+      // --- TEAM STRENGTH -> STARS (player-facing readout) ------------------
+      // Strength (0-100) maps to a star value; first row whose `min` the rating
+      // meets wins. Tune freely. Tier labels come from the star value
+      // (>=5 Contender, >=4 Strong, >=3 Solid, else Underdog).
+      STAR_THRESHOLDS: [
+        { min: 88, stars: 5 },
+        { min: 82, stars: 4.5 },
+        { min: 78, stars: 4 },
+        { min: 74, stars: 3.5 },
+        { min: 70, stars: 3 },
+        { min: 66, stars: 2.5 },
+        { min: 0,  stars: 2 }
+      ]
     }
   };
 })(typeof self !== 'undefined' ? self : this);

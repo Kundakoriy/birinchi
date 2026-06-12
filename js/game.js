@@ -203,38 +203,39 @@
   };
 
   // ===== ATTACK ==============================================================
+  // Resolves a swipe into a verdict. EVERYTHING is expressed in one normalized
+  // coordinate space: the shot point {gx,gy} and the keeper dive point {kx,ky}.
+  // The renderer projects exactly these two points, and the save check uses
+  // exactly these two points — one source of truth, so the visual can never
+  // disagree with the verdict.
   ShootoutMatch.prototype._resolvePlayerShot = function (shot) {
     var t = root.Config.TUNING;
-    // Miss only on genuinely extreme swipes.
+    var gx = (shot.x + 1) / 2, gy = shot.y; // intended on-target point (normalized)
+    // The keeper commits its dive (used for both the save check AND the render).
+    var dive = Keeper.predictDive({ gx: T.clamp(gx, 0, 1), gy: T.clamp(gy, 0, 1) },
+                                  this.keeperB, this.roundIndex, this.rng);
+
+    // Miss only on genuinely extreme swipes — the ball ends outside the frame.
     if (Math.abs(shot.x) > t.MISS_EDGE_X) {
       var pw = t.MISS_MAX_CHANCE * (Math.abs(shot.x) - t.MISS_EDGE_X) / (1 - t.MISS_EDGE_X);
       if (this.rng() < pw) {
-        return { result: 'wide', target: { x: shot.x + (shot.x >= 0 ? 0.22 : -0.22), y: shot.y } };
+        return { result: 'wide', shot: { gx: gx + (shot.x >= 0 ? 0.14 : -0.14), gy: gy }, dive: dive };
       }
     }
     if (shot.y > t.MISS_HIGH_Y) {
       var po = t.MISS_MAX_CHANCE * (shot.y - t.MISS_HIGH_Y) / (1 - t.MISS_HIGH_Y);
       if (this.rng() < po) {
-        return { result: 'over', target: { x: shot.x, y: shot.y + 0.25 } };
+        return { result: 'over', shot: { gx: gx, gy: gy + 0.18 }, dive: dive };
       }
     }
     // Woodwork.
     if (Math.abs(shot.x) > 0.88 && this.rng() < t.POST_CHANCE) {
-      return { result: 'post', target: { x: shot.x * 0.97, y: shot.y } };
+      return { result: 'post', shot: { gx: gx, gy: gy }, dive: dive };
     }
-    // Geometric resolution: the keeper predicts a continuous dive point and the
-    // shot is SAVED iff that point is within reach of the shot. Pure geometry —
-    // the ball ends at (gx,gy) and the keeper ends at (kx,ky), so the visual
-    // always matches the verdict.
-    var gx = (shot.x + 1) / 2, gy = shot.y;
-    var dive = Keeper.predictDive({ gx: gx, gy: gy }, this.keeperB, this.roundIndex, this.rng);
+    // Geometric verdict: SAVED iff the dive point is within reach of the shot.
     var reach = Keeper.keeperReach(this.keeperB, this.roundIndex);
     var saved = T.isSaved({ gx: gx, gy: gy }, dive, reach);
-    return {
-      result: saved ? 'save' : 'goal',
-      target: { x: shot.x, y: shot.y },
-      dive: dive // {kx, ky} in normalized goal space
-    };
+    return { result: saved ? 'save' : 'goal', shot: { gx: gx, gy: gy }, dive: dive };
   };
 
   ShootoutMatch.prototype._playerShoot = function (shot) {
@@ -242,18 +243,21 @@
     var info = this._resolvePlayerShot(shot);
     this.phase = 'flying';
     Sound && Sound.play('kick');
-    var to = this._goalPoint(info.target.x, info.target.y);
-    var dur = 430 / this.timeScale;
+    this._launch('A', info, 430 / this.timeScale, 'opp');
+  };
 
-    // The keeper ends exactly at its dive point (kx,ky). On a save that point is
-    // within reach of the shot, so keeper and ball visually meet.
+  // Project the resolved geometry and animate. Ball end = _goalPointN(shot), and
+  // keeper end = _goalPointN(dive) — both straight from the SAME normalized
+  // coordinates the save check used.
+  ShootoutMatch.prototype._launch = function (side, info, dur, kit) {
+    var self = this;
+    var to = this._goalPointN(info.shot.gx, info.shot.gy);
     var dive = info.dive || { kx: 0.5, ky: root.Config.TUNING.KEEPER_REST_Y };
     var diveTo = this._goalPointN(dive.kx, dive.ky);
-    this._keeper = { pose: poseForKx(dive.kx), t: 0, kit: 'opp', toX: diveTo.x, toY: diveTo.y };
+    this._keeper = { pose: poseForKx(dive.kx), t: 0, kit: kit, toX: diveTo.x, toY: diveTo.y };
     this._animKeeper(dur);
-
     this._animateBall(to, dur, function () {
-      self._applyResult('A', info, shot);
+      self._applyResult(side, info, null);
     });
   };
 
@@ -267,7 +271,8 @@
     if (!aimCorner) third = this.rng() < 0.5 ? 'C' : third;
     var sx = THIRD_X[third] + (this.rng() * 0.2 - 0.1);
     var sy = aimCorner ? (0.45 + this.rng() * 0.4) : (0.15 + this.rng() * 0.4);
-    this._oppShot = { x: T.clamp(sx, -0.95, 0.95), y: T.clamp(sy, 0, 0.98) };
+    // store the opponent's shot in normalized goal space {gx, gy}
+    this._oppShot = { gx: T.clamp((sx + 1) / 2, 0.02, 0.98), gy: T.clamp(sy, 0, 0.98) };
 
     this.phase = 'dive';
     this._keeper = { pose: 'ready', t: 0, kit: 'mine' };
@@ -287,23 +292,15 @@
   ShootoutMatch.prototype._commitDefense = function (dive) {
     if (this.phase !== 'dive') return;
     if (this._diveTimer) { clearTimeout(this._diveTimer); this._diveTimer = null; }
-    var self = this;
-    var opp = this._oppShot;
-    var ogx = (opp.x + 1) / 2, ogy = opp.y;
+    var opp = this._oppShot; // {gx, gy} normalized
     var reach = Keeper.keeperReach(this.keeperA, this.roundIndex);
-    var saved = T.isSaved({ gx: ogx, gy: ogy }, dive, reach);
-    var info = { result: saved ? 'save' : 'goal', target: { x: opp.x, y: opp.y }, dive: dive };
+    var saved = T.isSaved(opp, dive, reach);
+    var info = { result: saved ? 'save' : 'goal', shot: { gx: opp.gx, gy: opp.gy }, dive: dive };
 
     this.phase = 'oppflying';
     Sound && Sound.play('kick');
-    var to = this._goalPoint(opp.x, opp.y);
-    var diveTo = this._goalPointN(dive.kx, dive.ky);
-    this._keeper = { pose: poseForKx(dive.kx), t: 0, kit: 'mine', toX: diveTo.x, toY: diveTo.y };
-    var dur = 560; // compressed
-    this._animKeeper(dur);
-    this._animateBall(to, dur, function () {
-      self._applyResult('B', info, opp);
-    });
+    // Same projection path as attack: ball -> shot point, keeper -> dive point.
+    this._launch('B', info, 560, 'mine');
   };
 
   // ===== result handling =====================================================
